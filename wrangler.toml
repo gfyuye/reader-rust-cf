@@ -1,0 +1,56 @@
+name = "reader-rust-pages"
+pages_build_output_dir = "frontend/dist"
+main = "worker/index.ts"
+compatibility_date = "2026-03-24"
+compatibility_flags = ["nodejs_compat"]
+
+# 1. Cloudflare D1 Database Binding
+[[d1_databases]]
+binding = "DB"
+database_name = "reader-db"
+database_id = "reader-db"
+migrations_dir = "migrations"
+
+# 2. Cloudflare R2 Object Storage Bucket Binding
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "reader-storage"
+
+# 3. Cloudflare Queues for Chunked EPUB Parsing
+[[queues.producers]]
+binding = "EPUB_QUEUE"
+queue = "epub-indexing-queue"
+
+[[queues.consumers]]
+queue = "epub-indexing-queue"
+max_batch_size = 1
+max_batch_timeout = 5
+max_retries = 3
+
+# 4. Cloudflare Cron Triggers (Periodic Remote WebDAV Sync every 5 minutes)
+[triggers]
+crons = ["*/5 * * * *"]
+
+# 5. Cloudflare Workers AI Binding (Free Edge GPU Inference)
+[ai]
+binding = "AI"
+
+# 6. Environment Variables (Default values for all optional configurations)
+[vars]
+LOG_LEVEL = "info"
+SECURE = "true"
+SECURE_KEY = ""
+INVITE_CODE = ""
+USER_LIMIT = "50"
+USER_BOOK_LIMIT = "2000"
+USER_LOCAL_BOOK_LIMIT = "0"
+CF_ACCOUNT_ID = ""
+CF_API_TOKEN = ""
+CF_KITESURF_ENDPOINT = ""
+CF_KITESURF_ENABLED = "true"
+REMOTE_WEBVIEW_API = ""
+REMOTE_WEBVIEW_API_KEY = ""
+D1_DATABASE_ID = "reader-db"
+R2_BUCKET_NAME = "reader-storage"
+STORAGE_BACKEND = "r2"
+DATABASE_BACKEND = "d1"
