@@ -29,8 +29,8 @@ async function compressDeflate(data: Uint8Array): Promise<{ bytes: Uint8Array; m
     try {
       const cs = new CompressionStream("deflate-raw");
       const writer = cs.writable.getWriter();
-      writer.write(data);
-      writer.close();
+      await writer.write(data as unknown as BufferSource);
+      await writer.close();
       const compressed = await new Response(cs.readable).arrayBuffer();
       return { bytes: new Uint8Array(compressed), method: 8 }; // Deflated
     } catch {
@@ -47,8 +47,8 @@ async function decompressDeflate(data: Uint8Array): Promise<Uint8Array> {
   if (typeof DecompressionStream !== "undefined") {
     const ds = new DecompressionStream("deflate-raw");
     const writer = ds.writable.getWriter();
-    writer.write(data);
-    writer.close();
+    await writer.write(data as unknown as BufferSource);
+    await writer.close();
     const decompressed = await new Response(ds.readable).arrayBuffer();
     return new Uint8Array(decompressed);
   }
@@ -221,7 +221,6 @@ export async function unzipArchive(
 
     const compressionMethod = cdView.getUint16(10, true);
     const compressedSize = cdView.getUint32(20, true);
-    const uncompressedSize = cdView.getUint32(24, true);
     const nameLen = cdView.getUint16(28, true);
     const extraLen = cdView.getUint16(30, true);
     const commentLen = cdView.getUint16(32, true);

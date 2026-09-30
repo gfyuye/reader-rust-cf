@@ -35,9 +35,16 @@ crons = ["*/5 * * * *"]
 [ai]
 binding = "AI"
 
-# 6. Environment Variables (Default values for all optional configurations)
+# 6. Environment Variables (Automatically injected by Wrangler from .env.example)
 [vars]
+SERVER_HOST = "0.0.0.0"
+SERVER_PORT = "8080"
+DATABASE_URL = "sqlite:storage/reader.db?mode=rwc"
+STORAGE_DIR = "storage"
+ASSETS_DIR = "storage/assets"
+WEB_ROOT = "frontend/dist"
 LOG_LEVEL = "info"
+REQUEST_TIMEOUT_SECS = "15"
 SECURE = "true"
 SECURE_KEY = ""
 INVITE_CODE = ""
@@ -50,7 +57,7 @@ CF_KITESURF_ENDPOINT = ""
 CF_KITESURF_ENABLED = "true"
 REMOTE_WEBVIEW_API = ""
 REMOTE_WEBVIEW_API_KEY = ""
-D1_DATABASE_ID = "reader-db"
+D1_DATABASE_ID = ""
 R2_BUCKET_NAME = "reader-storage"
 STORAGE_BACKEND = "r2"
 DATABASE_BACKEND = "d1"

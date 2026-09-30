@@ -140,10 +140,8 @@ import {
   deleteWebdavFileList,
   getWebdavFileBlob,
   getWebdavFileList,
-  getWebdavFileText,
   type WebdavFileEntry,
   uploadFilesToWebdav,
-  uploadTextToWebdav,
 } from '../api/webdav'
 import {
   createLegadoBackupZip,
@@ -327,7 +325,7 @@ async function createBackup() {
   working.value = true
   try {
     const zipBytes = await createLegadoBackupZip()
-    const blob = new Blob([zipBytes], { type: 'application/zip' })
+    const blob = new Blob([zipBytes.buffer as ArrayBuffer], { type: 'application/zip' })
     const filename = buildBackupFilename()
     await uploadFilesToWebdav(
       [{ file: blob, name: filename }],

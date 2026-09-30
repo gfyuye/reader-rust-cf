@@ -163,13 +163,6 @@ const displayResults = computed<SearchBook[]>(() => {
   })
 })
 
-function closeEventSource() {
-  if (eventSource) {
-    eventSource.close()
-    eventSource = null
-  }
-}
-
 function ensureSearchSelection() {
   if (searchScope.value === 'group') {
     const selectedGroupStillValid = selectedGroup.value && sourceGroups.value.includes(selectedGroup.value)
