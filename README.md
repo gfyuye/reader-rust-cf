@@ -85,39 +85,71 @@
 
 ---
 
-## 🚀 全自动化部署指南（由项目下 Wrangler 统一接管）
+## 🚀 Cloudflare 控制台完整部署指南（两种入口实操步骤）
 
-所有云端资源（D1 数据库、R2 存储桶、Queues 异步队列、Workers AI 算力与全量环境变量）的创建、绑定及迁移均由项目下的 **Wrangler** 配置全权自动托管。
+根据 Cloudflare 控制台最新界面，连接 GitHub 仓库主要有以下两条实操路径，可任选一种：
 
-### 方式 A：推送到 GitHub ──> Cloudflare 控制台一键导入（最推荐）
+### 途径 1：新版 Workers & Pages 统一接入（自动识别命令，最推荐）
 
-1. **推送代码至 GitHub**：
-   ```bash
-   git add .
-   git commit -m "feat: automated cloudflare serverless deployment"
-   git push origin main
-   ```
-2. **在 Cloudflare 控制台导入仓库**：
-   - 进入 **Workers & Pages** ──> **Create application** ──> **Pages** ──> **Connect to Git**；
-   - 选中当前仓库，点击 **Begin setup**；
-   - 平台将自动识别根目录 `package.json` 与 `wrangler.toml`：
-     - **Build command**: `npm run build`
-     - **Build output directory**: `frontend/dist`
-   - 点击 **Save and Deploy**。
-3. **资源自动创建与绑定**：
-   - Cloudflare Pages 将自动依据 `wrangler.toml` 识别并完成 D1（`DB`）、R2（`BUCKET`）、Workers AI（`AI`）与异步队列（`EPUB_QUEUE`）的绑定，并自动注入全量默认环境变量。
-   - > **全自动建表说明**：代码已内置自愈初始化引擎，**不需要手动执行任何 SQL 脚本**。部署完成后首次打开网页，系统自动在 5 毫秒内完成所有 17 张数据表、切片索引与触发器的创建！
-4. **（可选）设置加密密钥**：
-   - 若需配置真实的 `CF_ACCOUNT_ID`、`CF_API_TOKEN` 或 `SECURE_KEY`，可在 Pages 项目的 **Settings** ──> **Environment variables** 中直接添加并勾选 **Encrypt（加密存储为密钥类型）**。
+1. **入口路径**：
+   登录 Cloudflare 控制台 ──> 点击左侧 **Workers & Pages** ──> 点击 **Create application** ──> 直接点击 **Connect to Git**（无需寻找 Pages 标签）。
+2. **连接仓库**：
+   授权并选中你的 GitHub 仓库（`reader-rust-cf`），点击 **Begin setup**。
+3. **命令识别情况**：
+   - 平台会自动依据项目根目录 `package.json` 识别：
+     - **构建命令 (Build command)**：自动识别为 `npm run build`
+     - **部署命令 (Deploy command)**：自动识别为 `npx wrangler deploy`
+4. **关于环境变量识别与密钥设置**：
+   - **控制台特性**：Cloudflare 的 Git 初次连接向导默认不会自动提取 `wrangler.toml` 内的变量填入前端向导输入框；
+   - **系统容错保证**：后端代码已具备完善的零配置默认回退（默认自动开启多用户安全模式 `SECURE="true"`，并选用免密内置 Workers AI 算力），即使此处留空也能正常构建运行；
+   - **添加加密密钥**：初次部署完成后，进入该项目的 **Settings** ──> **Variables and Secrets**，点击 **Add variable**，将需要的参数（如 `CF_ACCOUNT_ID`、`CF_API_TOKEN`、`SECURE_KEY` 等）逐项填入并勾选 **Encrypt（加密存储为密钥类型）**。
 
 ---
 
-### 方式 B：本地命令行一键自动化部署（`npm run deploy`）
+### 途径 2：经典 Pages 独立控制台接入（“想要部署 Pages？开始使用”）
 
-如果在本地终端已经登录过 Wrangler，只需一条命令即可完成全套云端资源自动创建与上线：
+1. **入口路径**：
+   登录 Cloudflare 控制台 ──> 点击 **Workers & Pages** ──> 点击下方的文字按钮 **“想要部署 Pages？开始使用”** ──> 进入 Pages 专属页面 ──> 点击 **导入现有 Git 存储库**。
+2. **连接仓库**：
+   选择你的 GitHub 仓库，点击 **开始设置**。
+3. **手动填写构建参数（此入口平台不会自动预填，请严格按以下填写）**：
+   - **项目名称 (Project name)**：自定义（如 `reader-rust-pages`）
+   - **框架预设 (Framework preset)**：选择 `None` 或 `Vite`
+   - **构建命令 (Build command)**：输入 `npm run build`
+   - **构建输出目录 (Build output directory)**：输入 `frontend/dist`
+   - **根目录 (Root directory)**：保持根目录留空（代表仓库根目录 `/`）
+4. **手动添加环境变量**：
+   - 点击展开页面下方的 **环境变量 (Environment variables)** 折叠面板；
+   - 参考上面的字典，点击“添加变量”填入你的配置（如需保密勾选 Encrypt）。
+5. 点击 **保存并部署 (Save and Deploy)**。
 
+---
+
+### 云端资源一键绑定（D1 数据库、R2 存储桶与 Workers AI）
+
+无论通过上述哪种途径部署，首次构建完成后，需在项目控制台进行存储与算力绑定：
+
+1. **绑定 D1 数据库**：
+   - 进入项目 **Settings** ──> **Functions** ──> 找到 **D1 database bindings**；
+   - 点击 **Add binding**：
+     - **Variable name（变量名）**：严格填写 `DB`
+     - **D1 database**：选择你的 `reader-db`（若未创建，在控制台 D1 页面一键新建并执行 `migrations/d1_schema.sql` 建表）。
+2. **绑定 R2 存储桶**：
+   - 在同一页面的 **R2 bucket bindings** ──> 点击 **Add binding**：
+     - **Variable name（变量名）**：严格填写 `BUCKET`
+     - **R2 bucket**：选择你的 `reader-storage`。
+3. **绑定 Workers AI 算力**：
+   - 在同一页面的 **Workers AI bindings** ──> 点击 **Add binding**：
+     - **Variable name（变量名）**：严格填写 `AI`。
+4. **重新部署生效**：
+   切换到 **Deployments** 页面，点击最新记录右侧的三个点 ──> **Retry deployment**。部署完成后，你的云原生在线阅读站便正式在全球边缘网络上线运行！
+
+---
+
+### 途径 3：本地命令行一键部署（`npm run deploy`）
+
+如果在本地终端安装并登录了 Wrangler，只需运行一条命令即可全自动创建 D1/R2/Queues 并完成部署：
 ```bash
-# 自动创建 D1 数据库、R2 桶、Queues 队列，执行数据库迁移并一键发布 Pages
 npm run deploy
 ```
 
