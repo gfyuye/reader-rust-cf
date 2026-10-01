@@ -1,8 +1,14 @@
 name = "reader-rust-pages"
-pages_build_output_dir = "frontend/dist"
 main = "worker/index.ts"
 compatibility_date = "2026-03-24"
 compatibility_flags = ["nodejs_compat"]
+
+# Static Assets Configuration (compatible with both `wrangler deploy` and Pages)
+[assets]
+directory = "frontend/dist"
+not_found_handling = "single-page-application"
+binding = "ASSETS"
+run_worker_first = [ "/reader3/*", "/assets/*", "/health" ]
 
 # 1. Cloudflare D1 Database Binding
 [[d1_databases]]

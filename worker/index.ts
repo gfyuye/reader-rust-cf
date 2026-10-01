@@ -12,6 +12,7 @@ export interface Env {
   DB: D1Database;
   BUCKET: R2Bucket;
   EPUB_QUEUE: Queue<EpubQueueMessage>;
+  ASSETS?: any; // Cloudflare Worker Static Assets Binding
   AI?: any; // Cloudflare Workers AI Binding
   CF_ACCOUNT_ID?: string;
   CF_API_TOKEN?: string;
@@ -220,6 +221,11 @@ export default {
       // Health check
       if (path === "/health") {
         return jsonResponse({ status: "ok", service: "reader-rust-cloudflare-worker" });
+      }
+
+      // Fallback to static assets if binding exists
+      if (env.ASSETS) {
+        return env.ASSETS.fetch(request);
       }
 
       return jsonResponse({ isSuccess: false, errorMsg: "接口未找到" }, 404);
