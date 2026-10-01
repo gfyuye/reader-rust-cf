@@ -327,7 +327,7 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
     return jsonResponse({ isSuccess: false, errorMsg: "系统注册用户数已达上限" });
   }
 
-  const isAdmin = (userCount?.cnt || 0) === 0 ? 1 : 0;
+  const isAdmin = 0; // Registered users are never auto-admin; admin access requires SECURE_KEY verification
   const salt = randomString(8);
   const encrypted = genEncryptedPassword(password, salt);
   const now = Math.floor(Date.now() / 1000);
@@ -943,7 +943,8 @@ async function handleGetAsset(request: Request, env: Env): Promise<Response> {
 
 async function handleEpubUpload(request: Request, env: Env): Promise<Response> {
   try {
-    const userNs = (await resolveUserNs(request, env)) || "default";
+    const userNs = await resolveUserNs(request, env);
+    if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
     const fileName = request.headers.get("X-File-Name") || "book.epub";
     const bookId = `epub_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
     const r2Key = `epubs/${userNs}/${bookId}.epub`;
@@ -1206,7 +1207,8 @@ async function markBookReady(bookId: string, total: number, env: Env): Promise<v
 
 async function handlePdfUpload(request: Request, env: Env): Promise<Response> {
   try {
-    const userNs = (await resolveUserNs(request, env)) || "default";
+    const userNs = await resolveUserNs(request, env);
+    if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
     const fileName = request.headers.get("X-File-Name") || "book.pdf";
     const bookId = `pdf_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
     const r2Key = `pdfs/${userNs}/${bookId}.pdf`;
@@ -1334,7 +1336,8 @@ async function handlePdfToc(bookId: string, env: Env): Promise<Response> {
 
 async function handleMobiUpload(request: Request, env: Env): Promise<Response> {
   try {
-    const userNs = (await resolveUserNs(request, env)) || "default";
+    const userNs = await resolveUserNs(request, env);
+    if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
     const fileName = request.headers.get("X-File-Name") || "book.mobi";
     const bookId = `mobi_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
     const r2Key = `mobis/${userNs}/${bookId}.mobi`;
@@ -1496,28 +1499,36 @@ function getAccessToken(request: Request): string | null {
   return new URL(request.url).searchParams.get("accessToken");
 }
 
-async function resolveUserNs(request: Request, env: Env): Promise<string | null> {
-  const isSecure = getEnv(env, "SECURE", "true") !== "false";
-  if (!isSecure) return "default";
-
-  const url = new URL(request.url);
-  const secureKey = url.searchParams.get("secureKey") || request.headers.get("X-Secure-Key");
+function isAuthorizedAdmin(request: Request, env: Env): boolean {
   const configuredKey = getEnv(env, "SECURE_KEY");
-  if (configuredKey && secureKey === configuredKey) {
-    return url.searchParams.get("userNS") || "default";
+  if (!configuredKey) return false;
+  const secureKey = request.headers.get("X-Secure-Key") || new URL(request.url).searchParams.get("secureKey");
+  return secureKey === configuredKey;
+}
+
+async function resolveUserNs(request: Request, env: Env): Promise<string | null> {
+  const accessToken = getAccessToken(request);
+
+  if (accessToken && accessToken.includes(":")) {
+    const [username, token] = accessToken.split(":");
+    const session = await env.DB.prepare(
+      `SELECT username FROM user_sessions WHERE username = ?1 AND token = ?2 AND expire_at > ?3`
+    )
+      .bind(username, token, Math.floor(Date.now() / 1000))
+      .first<{ username: string }>();
+
+    if (session) {
+      if (isAuthorizedAdmin(request, env)) {
+        const overrideNs = new URL(request.url).searchParams.get("userNS");
+        if (overrideNs && overrideNs.trim()) {
+          return overrideNs.trim();
+        }
+      }
+      return session.username;
+    }
   }
 
-  const accessToken = getAccessToken(request);
-  if (!accessToken || !accessToken.includes(":")) return null;
-
-  const [username, token] = accessToken.split(":");
-  const session = await env.DB.prepare(
-    `SELECT username FROM user_sessions WHERE username = ?1 AND token = ?2 AND expire_at > ?3`
-  )
-    .bind(username, token, Math.floor(Date.now() / 1000))
-    .first<{ username: string }>();
-
-  return session?.username || null;
+  return null;
 }
 
 function generateSessionToken(username: string): string {
@@ -2402,7 +2413,8 @@ async function fallbackFetchFromRemoteWebdav(
 ): Promise<Uint8Array | null> {
   try {
     const parts = relKey.replace(/^\/+/, "").split("/");
-    const username = parts.length > 1 ? parts[1] : "default";
+    const username = parts.length > 1 ? parts[1] : "";
+    if (!username) return null;
 
     const config = await env.DB.prepare(
       `SELECT server_url, webdav_user, webdav_password, enabled FROM user_remote_webdav WHERE username = ?1`
@@ -2754,7 +2766,8 @@ function scanTxtChapterOffsets(text: string, utf8Bytes: Uint8Array): Array<{ tit
 
 async function handleTxtUpload(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   try {
-    const userNs = (await resolveUserNs(request, env)) || "default";
+    const userNs = await resolveUserNs(request, env);
+    if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
     let fileName = "book.txt";
     let fileBuffer: ArrayBuffer;
 
@@ -3660,9 +3673,8 @@ async function handleGetUserList(request: Request, env: Env): Promise<Response> 
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
-  const admin = await env.DB.prepare(`SELECT is_admin FROM users WHERE username = ?1`).bind(userNs).first<any>();
-  if (!admin || admin.is_admin !== 1) {
-    return jsonResponse({ isSuccess: false, errorMsg: "需要管理员权限" });
+  if (!isAuthorizedAdmin(request, env)) {
+    return jsonResponse({ isSuccess: false, errorMsg: "需要验证管理密码 (SecureKey)" });
   }
 
   const rows = await env.DB.prepare(
@@ -3676,9 +3688,8 @@ async function handleAddUser(request: Request, env: Env): Promise<Response> {
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
-  const admin = await env.DB.prepare(`SELECT is_admin FROM users WHERE username = ?1`).bind(userNs).first<any>();
-  if (!admin || admin.is_admin !== 1) {
-    return jsonResponse({ isSuccess: false, errorMsg: "需要管理员权限" });
+  if (!isAuthorizedAdmin(request, env)) {
+    return jsonResponse({ isSuccess: false, errorMsg: "需要验证管理密码 (SecureKey)" });
   }
 
   const { username, password } = await request.json<any>();
@@ -3702,9 +3713,8 @@ async function handleUpdateUser(request: Request, env: Env): Promise<Response> {
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
-  const admin = await env.DB.prepare(`SELECT is_admin FROM users WHERE username = ?1`).bind(userNs).first<any>();
-  if (!admin || admin.is_admin !== 1) {
-    return jsonResponse({ isSuccess: false, errorMsg: "需要管理员权限" });
+  if (!isAuthorizedAdmin(request, env)) {
+    return jsonResponse({ isSuccess: false, errorMsg: "需要验证管理密码 (SecureKey)" });
   }
 
   const { username, enableWebdav, enableLocalStore, isAdmin } = await request.json<any>();
@@ -3722,9 +3732,8 @@ async function handleDeleteUsers(request: Request, env: Env): Promise<Response> 
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
-  const admin = await env.DB.prepare(`SELECT is_admin FROM users WHERE username = ?1`).bind(userNs).first<any>();
-  if (!admin || admin.is_admin !== 1) {
-    return jsonResponse({ isSuccess: false, errorMsg: "需要管理员权限" });
+  if (!isAuthorizedAdmin(request, env)) {
+    return jsonResponse({ isSuccess: false, errorMsg: "需要验证管理密码 (SecureKey)" });
   }
 
   const usernames = await request.json<string[]>();
@@ -3741,9 +3750,8 @@ async function handleResetPassword(request: Request, env: Env): Promise<Response
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
-  const admin = await env.DB.prepare(`SELECT is_admin FROM users WHERE username = ?1`).bind(userNs).first<any>();
-  if (!admin || admin.is_admin !== 1) {
-    return jsonResponse({ isSuccess: false, errorMsg: "需要管理员权限" });
+  if (!isAuthorizedAdmin(request, env)) {
+    return jsonResponse({ isSuccess: false, errorMsg: "需要验证管理密码 (SecureKey)" });
   }
 
   const { username, password } = await request.json<any>();
