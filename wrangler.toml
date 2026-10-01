@@ -3,23 +3,14 @@ pages_build_output_dir = "dist"
 compatibility_date = "2026-03-24"
 compatibility_flags = ["nodejs_compat"]
 
-# 1. Cloudflare D1 Database Binding
-[[d1_databases]]
-binding = "DB"
-database_name = "reader-db"
-database_id = "reader-db"
-migrations_dir = "migrations"
+# Cloudflare Pages 资源绑定说明:
+# 为避免在 Git 代码中硬编码不可复用的数据库 UUID 导致部署校验失败，
+# D1、R2 与 AI 绑定请在 Cloudflare Pages 控制台的 [Settings -> Functions] 页面一键下拉关联：
+# 1. D1 Database Binding: 变量名严格填写 "DB"，关联你的 "reader-db"
+# 2. R2 Bucket Binding: 变量名严格填写 "BUCKET"，关联你的 "reader-storage"
+# 3. Workers AI Binding: 变量名严格填写 "AI"
 
-# 2. Cloudflare R2 Object Storage Bucket Binding
-[[r2_buckets]]
-binding = "BUCKET"
-bucket_name = "reader-storage"
-
-# 3. Cloudflare Workers AI Binding (Free Edge GPU Inference)
-[ai]
-binding = "AI"
-
-# 4. Environment Variables (Automatically injected by Wrangler from .env.example)
+# 环境变量字典 (自动从 .env.example 同步)
 [vars]
 SERVER_HOST = "0.0.0.0"
 SERVER_PORT = "8080"

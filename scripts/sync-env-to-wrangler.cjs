@@ -30,11 +30,11 @@ function syncEnvToWrangler() {
     vars.push('DATABASE_BACKEND = "d1"');
   }
 
-  const varsHeader = '# 6. Environment Variables (Automatically injected by Wrangler from .env.example)\n[vars]\n';
+  const varsHeader = '# 环境变量字典 (自动从 .env.example 同步)\n[vars]\n';
   const varsSection = varsHeader + vars.join('\n') + '\n';
 
   if (wranglerContent.includes('[vars]')) {
-    const parts = wranglerContent.split(/# 6\. Environment Variables[\s\S]*|\[vars\][\s\S]*/);
+    const parts = wranglerContent.split(/#.*环境变量[\s\S]*|\[vars\][\s\S]*/);
     wranglerContent = parts[0].trimEnd() + '\n\n' + varsSection;
   } else {
     wranglerContent = wranglerContent.trimEnd() + '\n\n' + varsSection;
