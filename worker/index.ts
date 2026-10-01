@@ -1,3 +1,5 @@
+import { ENV_DEFAULTS } from "./env-defaults";
+
 /**
  * Cloudflare Worker Backend for reader-rust
  * Full Serverless implementation on Cloudflare Edge:
@@ -22,11 +24,34 @@ export interface Env {
   SECURE?: string;
   SECURE_KEY?: string;
   INVITE_CODE?: string;
+  USER_LIMIT?: string;
+  USER_BOOK_LIMIT?: string;
+  USER_LOCAL_BOOK_LIMIT?: string;
+  LOG_LEVEL?: string;
+  D1_DATABASE_ID?: string;
+  R2_BUCKET_NAME?: string;
+  STORAGE_BACKEND?: string;
+  DATABASE_BACKEND?: string;
 }
 
 export interface EpubQueueMessage {
   bookId: string;
   userNs: string;
+}
+
+/**
+ * Reads variable from runtime env (Cloudflare Dashboard / Secrets) with build-time fallback from .env.example
+ */
+function getEnv(env: Env, key: string, fallback: string = ""): string {
+  const val = (env as any)[key];
+  if (val !== undefined && val !== null && String(val).trim() !== "") {
+    return String(val).trim();
+  }
+  const defaultVal = ENV_DEFAULTS[key];
+  if (defaultVal !== undefined && defaultVal !== null && String(defaultVal).trim() !== "") {
+    return String(defaultVal).trim();
+  }
+  return fallback;
 }
 
 export default {
@@ -289,11 +314,17 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
     return jsonResponse({ isSuccess: false, errorMsg: "密码长度不能少于8位" });
   }
 
-  if (env.INVITE_CODE && env.INVITE_CODE !== code) {
+  const inviteCode = getEnv(env, "INVITE_CODE");
+  if (inviteCode && inviteCode !== code) {
     return jsonResponse({ isSuccess: false, errorMsg: "邀请码无效" });
   }
 
   const userCount = await env.DB.prepare(`SELECT count(*) as cnt FROM users`).first<{ cnt: number }>();
+  const userLimit = parseInt(getEnv(env, "USER_LIMIT", "50"), 10);
+  if ((userCount?.cnt || 0) >= userLimit) {
+    return jsonResponse({ isSuccess: false, errorMsg: "系统注册用户数已达上限" });
+  }
+
   const isAdmin = (userCount?.cnt || 0) === 0 ? 1 : 0;
   const salt = randomString(8);
   const encrypted = genEncryptedPassword(password, salt);
@@ -654,14 +685,20 @@ async function handleGetBookContent(request: Request, env: Env): Promise<Respons
     }
 
     const isWebView = url.searchParams.get("webView") === "true";
-    if (isWebView && env.CF_ACCOUNT_ID && env.CF_API_TOKEN && env.CF_KITESURF_ENABLED !== "false") {
+    const cfAccountId = getEnv(env, "CF_ACCOUNT_ID");
+    const cfApiToken = getEnv(env, "CF_API_TOKEN");
+    const kitesurfEnabled = getEnv(env, "CF_KITESURF_ENABLED", "true") !== "false";
+    const remoteWebview = getEnv(env, "REMOTE_WEBVIEW_API");
+    const remoteWebviewKey = getEnv(env, "REMOTE_WEBVIEW_API_KEY");
+
+    if (isWebView && cfAccountId && cfApiToken && kitesurfEnabled) {
       // 1. Try Kitesurf
       try {
-        const kitesurfUrl = `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/browser-run/content?browser=kitesurf`;
+        const kitesurfUrl = `https://api.cloudflare.com/client/v4/accounts/${cfAccountId}/browser-run/content?browser=kitesurf`;
         const kResp = await fetch(kitesurfUrl, {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${env.CF_API_TOKEN}`,
+            Authorization: `Bearer ${cfApiToken}`,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
@@ -679,13 +716,13 @@ async function handleGetBookContent(request: Request, env: Env): Promise<Respons
     }
 
     // 2. Try Remote WebView API if webView was requested
-    if (isWebView && env.REMOTE_WEBVIEW_API) {
+    if (isWebView && remoteWebview) {
       try {
-        const rResp = await fetch(`${env.REMOTE_WEBVIEW_API.replace(/\/$/, "")}/render.html`, {
+        const rResp = await fetch(`${remoteWebview.replace(/\/$/, "")}/render.html`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            ...(env.REMOTE_WEBVIEW_API_KEY ? { Authorization: `Bearer ${env.REMOTE_WEBVIEW_API_KEY}` } : {}),
+            ...(remoteWebviewKey ? { Authorization: `Bearer ${remoteWebviewKey}` } : {}),
           },
           body: JSON.stringify({
             url: chapterUrl,
@@ -1404,11 +1441,13 @@ function getAccessToken(request: Request): string | null {
 }
 
 async function resolveUserNs(request: Request, env: Env): Promise<string | null> {
-  if (env.SECURE === "false") return "default";
+  const isSecure = getEnv(env, "SECURE", "true") !== "false";
+  if (!isSecure) return "default";
 
   const url = new URL(request.url);
   const secureKey = url.searchParams.get("secureKey") || request.headers.get("X-Secure-Key");
-  if (env.SECURE_KEY && secureKey === env.SECURE_KEY) {
+  const configuredKey = getEnv(env, "SECURE_KEY");
+  if (configuredKey && secureKey === configuredKey) {
     return url.searchParams.get("userNS") || "default";
   }
 
@@ -3142,15 +3181,18 @@ async function searchSingleSource(source: any, key: string, page: number, env: E
 
     let html = "";
     const isWebView = urlConfig.includes('"webView":true') || urlConfig.includes('"webView": true');
+    const cfAccountId = getEnv(env, "CF_ACCOUNT_ID");
+    const cfApiToken = getEnv(env, "CF_API_TOKEN");
+    const kitesurfEnabled = getEnv(env, "CF_KITESURF_ENABLED", "true") !== "false";
 
-    if (isWebView && env.CF_ACCOUNT_ID && env.CF_API_TOKEN && env.CF_KITESURF_ENABLED !== "false") {
+    if (isWebView && cfAccountId && cfApiToken && kitesurfEnabled) {
       try {
         const kResp = await fetch(
-          `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/browser-run/content?browser=kitesurf`,
+          `https://api.cloudflare.com/client/v4/accounts/${cfAccountId}/browser-run/content?browser=kitesurf`,
           {
             method: "POST",
             headers: {
-              Authorization: `Bearer ${env.CF_API_TOKEN}`,
+              Authorization: `Bearer ${cfApiToken}`,
               "Content-Type": "application/json",
             },
             body: JSON.stringify({ url: targetUrl, rejectResourceTypes: ["image", "media", "font"] }),

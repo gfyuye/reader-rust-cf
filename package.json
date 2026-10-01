@@ -4,7 +4,7 @@
   "description": "Cloudflare Pages serverless book reading service",
   "private": true,
   "scripts": {
-    "prebuild": "node scripts/sync-env-to-wrangler.cjs",
+    "prebuild": "node scripts/generate-env-defaults.cjs",
     "build": "npm --prefix frontend install && npm --prefix frontend run build && node -e \"const fs=require('fs'); if(fs.existsSync('frontend/dist')&&!fs.existsSync('dist')){fs.cpSync('frontend/dist','dist',{recursive:true})}\"",
     "deploy": "node scripts/setup-cf.cjs",
     "setup:cf": "node scripts/setup-cf.cjs"
