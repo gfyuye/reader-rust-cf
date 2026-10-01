@@ -65,21 +65,21 @@
 
 | 变量名称 (Key) | 变量类型 | `wrangler.toml` 默认值 | 功能说明 |
 | :--- | :---: | :---: | :--- |
-| **`CF_ACCOUNT_ID`** | **加密密钥 (Secret)** | `""` | Cloudflare 账户 ID（用于调用 Kitesurf 无头浏览器 API） |
-| **`CF_API_TOKEN`** | **加密密钥 (Secret)** | `""` | 具备 `Browser Rendering - Edit` 权限的 API Token |
-| **`SECURE_KEY`** | **加密密钥 (Secret)** | `""` | 管理员特权密钥（配置后可携带 `X-Secure-Key` 头直接执行管理） |
-| **`REMOTE_WEBVIEW_API`** | **加密密钥 (Secret)** | `""` | 备用第三方渲染节点地址（Kitesurf 429 冷却时全量接管） |
-| **`REMOTE_WEBVIEW_API_KEY`** | **加密密钥 (Secret)** | `""` | 备用渲染服务的认证密钥 |
-| **`INVITE_CODE`** | **加密密钥 (Secret)** | `""` | 新用户注册邀请码（留空则不设注册门槛） |
-| **`CF_KITESURF_ENDPOINT`** | 普通变量 (Var) | `""` | 自定义 Kitesurf 代理或内网调用端点 |
+| **`CF_ACCOUNT_ID`** | **加密密钥 (Secret)** | 留空 | Cloudflare 账户 ID（仅在需要调用 Kitesurf 无头浏览器时可选填写，不填不影响常规阅读） |
+| **`CF_API_TOKEN`** | **加密密钥 (Secret)** | 留空 | 具备 `Browser Rendering - Edit` 权限的 API Token（可选） |
+| **`SECURE_KEY`** | **加密密钥 (Secret)** | 留空 | 管理员特权密钥（配置后可携带 `X-Secure-Key` 头直接执行管理） |
+| **`REMOTE_WEBVIEW_API`** | **加密密钥 (Secret)** | 留空 | 备用第三方渲染节点地址（Kitesurf 429 冷却时全量接管） |
+| **`REMOTE_WEBVIEW_API_KEY`** | **加密密钥 (Secret)** | 留空 | 备用渲染服务的认证密钥 |
+| **`INVITE_CODE`** | **加密密钥 (Secret)** | 留空 | 新用户注册邀请码（留空则不设注册门槛） |
+| **`CF_KITESURF_ENDPOINT`** | 普通变量 (Var) | 留空 | 自定义 Kitesurf 代理或内网调用端点（无需自行设置，默认留空即可） |
 | **`CF_KITESURF_ENABLED`** | 普通变量 (Var) | `"true"` | 是否启用 Cloudflare Kitesurf 动态渲染 |
 | **`SECURE`** | 普通变量 (Var) | `"true"` | 是否开启多用户安全模式（系统默认开启） |
 | **`USER_LIMIT`** | 普通变量 (Var) | `"50"` | 系统允许注册的最大用户数 |
 | **`USER_BOOK_LIMIT`** | 普通变量 (Var) | `"2000"` | 单个用户书架允许存放的最大书籍数量 |
 | **`USER_LOCAL_BOOK_LIMIT`** | 普通变量 (Var) | `"0"` | 用户上传本地书籍上限（0 表示不限制） |
 | **`LOG_LEVEL`** | 普通变量 (Var) | `"info"` | 边缘运行时日志级别 |
-| **`D1_DATABASE_ID`** | 普通变量 (Var) | `"reader-db"` | 绑定的 D1 数据库名称 |
-| **`R2_BUCKET_NAME`** | 普通变量 (Var) | `"reader-storage"` | 绑定的 R2 存储桶名称 |
+| **`D1_DATABASE_ID`** | 普通变量 (Var) | `"reader-db"` | D1 数据库名称标识（仅本地开发使用，线上生产环境由 Pages 后台绑定的 `DB` 对象驱动） |
+| **`R2_BUCKET_NAME`** | 普通变量 (Var) | `"reader-storage"` | R2 存储桶名称标识（生产环境由 Pages 后台绑定的 `BUCKET` 对象驱动） |
 | **`STORAGE_BACKEND`** | 普通变量 (Var) | `"r2"` | 存储后端类型（默认 R2） |
 | **`DATABASE_BACKEND`** | 普通变量 (Var) | `"d1"` | 数据库后端类型（默认 D1） |
 
