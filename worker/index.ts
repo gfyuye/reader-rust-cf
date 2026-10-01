@@ -11,7 +11,7 @@
 export interface Env {
   DB: D1Database;
   BUCKET: R2Bucket;
-  EPUB_QUEUE: Queue<EpubQueueMessage>;
+  EPUB_QUEUE?: any;
   ASSETS?: any; // Cloudflare Worker Static Assets Binding
   AI?: any; // Cloudflare Workers AI Binding
   CF_ACCOUNT_ID?: string;
@@ -232,24 +232,6 @@ export default {
     } catch (err: any) {
       return jsonResponse({ isSuccess: false, errorMsg: err.message || "服务器内部错误" }, 500);
     }
-  },
-
-  // Cloudflare Queues Consumer: Chunked EPUB parsing
-  async queue(batch: MessageBatch<EpubQueueMessage>, env: Env): Promise<void> {
-    for (const message of batch.messages) {
-      const { bookId } = message.body;
-      const startTime = Date.now();
-      const outcome = await processEpubChunkWithBudget(bookId, startTime, 15000, env);
-      if (outcome.needsMore) {
-        await env.EPUB_QUEUE.send({ bookId, userNs: message.body.userNs });
-      }
-      message.ack();
-    }
-  },
-
-  // Cloudflare Scheduled Cron Trigger: Periodic Sync every 5 minutes
-  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(handleScheduledSync(env));
   },
 };
 
@@ -927,25 +909,47 @@ async function handleEpubUpload(request: Request, env: Env): Promise<Response> {
     const totalChapters = spinePaths.length;
     const now = Math.floor(Date.now() / 1000);
 
+    const stmts = [];
+    for (let i = 0; i < spinePaths.length; i++) {
+      const path = spinePaths[i];
+      const entry = entryMap.get(path);
+      if (entry) {
+        const dataOffset = entry.localHeaderOffset + 30 + new TextEncoder().encode(path).length;
+        stmts.push(
+          env.DB.prepare(
+            `INSERT INTO epub_chapters (book_id, chapter_index, title, file_name, byte_offset, byte_length, uncompressed_length, compression_method, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(book_id, chapter_index) DO UPDATE SET byte_offset = excluded.byte_offset, byte_length = excluded.byte_length`
+          ).bind(
+            bookId,
+            i,
+            `第 ${i + 1} 节`,
+            path,
+            dataOffset,
+            entry.compressedSize,
+            entry.uncompressedSize,
+            entry.compressionMethod,
+            now
+          )
+        );
+      }
+    }
+
+    for (let i = 0; i < stmts.length; i += 50) {
+      await env.DB.batch(stmts.slice(i, i + 50));
+    }
+
     await env.DB.prepare(
       `INSERT INTO epub_books (book_id, user_ns, file_name, r2_key, file_size, status, total_chapters, parsed_chapters, title, author, created_at, updated_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, 'indexing', ?6, 0, ?7, ?8, ?9, ?10)`
+       VALUES (?1, ?2, ?3, ?4, ?5, 'ready', ?6, ?6, ?7, ?8, ?9, ?10)
+       ON CONFLICT(book_id) DO UPDATE SET status='ready', total_chapters=excluded.total_chapters, parsed_chapters=excluded.parsed_chapters, updated_at=excluded.updated_at`
     )
       .bind(bookId, userNs, fileName, r2Key, fileSize, totalChapters, title, author, now, now)
       .run();
 
-    await env.DB.prepare(
-      `INSERT INTO epub_parse_checkpoints (book_id, last_processed_index, spine_json, title_map_json, updated_at)
-       VALUES (?1, 0, ?2, '{}', ?3)`
-    )
-      .bind(bookId, JSON.stringify(spinePaths), now)
-      .run();
-
-    await env.EPUB_QUEUE.send({ bookId, userNs });
-
     return jsonResponse({
       isSuccess: true,
-      data: { bookId, fileName, title, author, totalChapters, status: "indexing" },
+      data: { bookId, fileName, title, author, totalChapters, status: "ready" },
     });
   } catch (err: any) {
     return jsonResponse({ isSuccess: false, errorMsg: err.message });
