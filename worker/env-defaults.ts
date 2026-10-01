@@ -25,7 +25,6 @@ export const ENV_DEFAULTS: Record<string, string> = {
   "CF_KITESURF_ENABLED": "true",
   "REMOTE_WEBVIEW_API": "",
   "REMOTE_WEBVIEW_API_KEY": "",
-  "D1_DATABASE_ID": "reader-db",
   "R2_BUCKET_NAME": "reader-storage",
   "STORAGE_BACKEND": "r2",
   "DATABASE_BACKEND": "d1"

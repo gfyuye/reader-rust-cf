@@ -28,7 +28,6 @@ export interface Env {
   USER_BOOK_LIMIT?: string;
   USER_LOCAL_BOOK_LIMIT?: string;
   LOG_LEVEL?: string;
-  D1_DATABASE_ID?: string;
   R2_BUCKET_NAME?: string;
   STORAGE_BACKEND?: string;
   DATABASE_BACKEND?: string;
@@ -301,6 +300,9 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
         username,
         accessToken: `${username}:${token}`,
         isAdmin: existing.is_admin === 1,
+        enableWebdav: existing.enable_webdav === 1,
+        enableLocalStore: existing.enable_local_store === 1,
+        enableAiModel: existing.enable_ai_model === 1,
       },
     });
   }
@@ -351,6 +353,9 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
       username,
       accessToken: `${username}:${token}`,
       isAdmin: isAdmin === 1,
+      enableWebdav: true,
+      enableLocalStore: true,
+      enableAiModel: true,
     },
   });
 }
@@ -367,23 +372,62 @@ async function handleLogout(request: Request, env: Env): Promise<Response> {
 }
 
 async function handleGetUserInfo(request: Request, env: Env): Promise<Response> {
+  const isSecure = getEnv(env, "SECURE", "true") !== "false";
   const userNs = await resolveUserNs(request, env);
-  if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
+
+  const url = new URL(request.url);
+  const secureKey = url.searchParams.get("secureKey") || request.headers.get("X-Secure-Key");
+  const configuredKey = getEnv(env, "SECURE_KEY");
+  const secureKeyRequired = !!configuredKey;
+  const adminAuthorized = !!(configuredKey && secureKey === configuredKey);
+
+  if (!userNs) {
+    return jsonResponse({
+      isSuccess: true,
+      data: {
+        userInfo: null,
+        secure: isSecure,
+        secureKeyRequired,
+        adminAuthorized,
+      },
+    });
+  }
 
   const user = await env.DB.prepare(
-    `SELECT username, is_admin, enable_webdav, enable_local_store FROM users WHERE username = ?1`
+    `SELECT username, last_login_at, created_at, is_admin, enable_webdav, enable_local_store, enable_ai_model FROM users WHERE username = ?1`
   )
     .bind(userNs)
-    .first<{ username: string; is_admin: number; enable_webdav: number; enable_local_store: number }>();
+    .first<any>();
+
+  const token = getAccessToken(request) || "";
+
+  const userInfo = user
+    ? {
+        username: user.username,
+        accessToken: token,
+        lastLoginAt: user.last_login_at || 0,
+        createdAt: user.created_at || 0,
+        isAdmin: user.is_admin === 1,
+        enableWebdav: user.enable_webdav === 1,
+        enableLocalStore: user.enable_local_store === 1,
+        enableAiModel: user.enable_ai_model === 1,
+      }
+    : {
+        username: userNs,
+        accessToken: token,
+        isAdmin: adminAuthorized,
+        enableWebdav: true,
+        enableLocalStore: true,
+        enableAiModel: true,
+      };
 
   return jsonResponse({
     isSuccess: true,
     data: {
-      username: userNs,
-      userNs,
-      isAdmin: user?.is_admin === 1,
-      enableWebdav: user?.enable_webdav === 1,
-      enableLocalStore: user?.enable_local_store === 1,
+      userInfo,
+      secure: isSecure,
+      secureKeyRequired,
+      adminAuthorized: adminAuthorized || !!userInfo?.isAdmin,
     },
   });
 }
@@ -1433,10 +1477,22 @@ function jsonResponse(data: any, status: number = 200): Response {
 
 function getAccessToken(request: Request): string | null {
   const auth = request.headers.get("Authorization");
-  if (auth && auth.startsWith("Bearer ")) return auth.substring(7);
+  if (auth && auth.trim()) {
+    const trimmed = auth.trim();
+    if (trimmed.toLowerCase().startsWith("bearer ")) {
+      const token = trimmed.substring(7).trim();
+      if (token) return token;
+    } else {
+      return trimmed;
+    }
+  }
+  const tokenHeader = request.headers.get("token") || request.headers.get("X-Access-Token");
+  if (tokenHeader && tokenHeader.trim()) return tokenHeader.trim();
+
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/token=([^;]+)/);
   if (match) return decodeURIComponent(match[1]);
+
   return new URL(request.url).searchParams.get("accessToken");
 }
 

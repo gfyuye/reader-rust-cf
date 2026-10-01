@@ -78,7 +78,6 @@
 | **`USER_BOOK_LIMIT`** | 普通变量 (Var) | `"2000"` | 单个用户书架允许存放的最大书籍数量 |
 | **`USER_LOCAL_BOOK_LIMIT`** | 普通变量 (Var) | `"0"` | 用户上传本地书籍上限（0 表示不限制） |
 | **`LOG_LEVEL`** | 普通变量 (Var) | `"info"` | 边缘运行时日志级别 |
-| **`D1_DATABASE_ID`** | 普通变量 (Var) | `"reader-db"` | D1 数据库名称标识（仅本地开发使用，线上生产环境由 Pages 后台绑定的 `DB` 对象驱动） |
 | **`R2_BUCKET_NAME`** | 普通变量 (Var) | `"reader-storage"` | R2 存储桶名称标识（生产环境由 Pages 后台绑定的 `BUCKET` 对象驱动） |
 | **`STORAGE_BACKEND`** | 普通变量 (Var) | `"r2"` | 存储后端类型（默认 R2） |
 | **`DATABASE_BACKEND`** | 普通变量 (Var) | `"d1"` | 数据库后端类型（默认 D1） |

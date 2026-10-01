@@ -25,8 +25,6 @@ pub struct AppConfig {
     #[serde(default = "default_true")]
     pub cf_kitesurf_enabled: bool,
     #[serde(default)]
-    pub d1_database_id: Option<String>,
-    #[serde(default)]
     pub r2_bucket_name: Option<String>,
     #[serde(default)]
     pub remote_webview_api: Option<String>,
@@ -59,7 +57,6 @@ impl Default for AppConfig {
             cf_api_token: None,
             cf_kitesurf_endpoint: None,
             cf_kitesurf_enabled: true,
-            d1_database_id: None,
             r2_bucket_name: None,
             remote_webview_api: None,
             remote_webview_api_key: None,

@@ -24,7 +24,6 @@ function generateEnvDefaults() {
   // Ensure default storage backends are present
   if (!defaults.STORAGE_BACKEND) defaults.STORAGE_BACKEND = 'r2';
   if (!defaults.DATABASE_BACKEND) defaults.DATABASE_BACKEND = 'd1';
-  if (!defaults.D1_DATABASE_ID) defaults.D1_DATABASE_ID = 'reader-db';
 
   const fileContent = `/**
  * AUTO-GENERATED AT BUILD TIME FROM .env.example
