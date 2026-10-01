@@ -85,73 +85,52 @@
 
 ---
 
-## 🚀 Cloudflare 控制台完整部署指南（两种入口实操步骤）
+## 🚀 Cloudflare Pages 公开仓库安全部署指南（控制台纯 GUI 零泄密部署）
 
-根据 Cloudflare 控制台最新界面，连接 GitHub 仓库主要有以下两条实操路径，可任选一种：
+为保障公共 GitHub 仓库的安全性（**不在公开代码中暴露任何私有 D1 数据库 UUID 与个人凭据**），本项目遵循 Cloudflare Pages 官方推荐的控制台安全绑定标准：
 
-### 途径 1：新版 Workers & Pages 统一接入（自动识别命令，最推荐）
+### 第一步：在 Cloudflare 控制台创建 D1 与 R2（各点击一次）
 
-1. **入口路径**：
-   登录 Cloudflare 控制台 ──> 点击左侧 **Workers & Pages** ──> 点击 **Create application** ──> 直接点击 **Connect to Git**（无需寻找 Pages 标签）。
-2. **连接仓库**：
-   授权并选中你的 GitHub 仓库（`reader-rust-cf`），点击 **Begin setup**。
-3. **命令识别情况**：
-   - 平台会自动依据项目根目录 `package.json` 识别：
-     - **构建命令 (Build command)**：自动识别为 `npm run build`
-     - **部署命令 (Deploy command)**：自动识别为 `npx wrangler deploy`
-4. **关于环境变量识别与密钥设置**：
-   - **控制台特性**：Cloudflare 的 Git 初次连接向导默认不会自动提取 `wrangler.toml` 内的变量填入前端向导输入框；
-   - **系统容错保证**：后端代码已具备完善的零配置默认回退（默认自动开启多用户安全模式 `SECURE="true"`，并选用免密内置 Workers AI 算力），即使此处留空也能正常构建运行；
-   - **添加加密密钥**：初次部署完成后，进入该项目的 **Settings** ──> **Variables and Secrets**，点击 **Add variable**，将需要的参数（如 `CF_ACCOUNT_ID`、`CF_API_TOKEN`、`SECURE_KEY` 等）逐项填入并勾选 **Encrypt（加密存储为密钥类型）**。
+1. **创建 D1 数据库**：
+   - 控制台左侧菜单 ──> **Storage & Databases** ──> **D1** ──> 点击 **Create database** ──> 输入名称 **`reader-db`** ──> 点击 **Create**；
+   - 点击进入 `reader-db` ──> 切换到 **Console** 面板，将项目中的 `migrations/d1_schema.sql` 纯净建表脚本贴入并点击 **Execute** 执行建表。
+2. **创建 R2 存储桶**：
+   - 控制台左侧菜单 ──> **Storage & Databases** ──> **R2** ──> 点击 **Create bucket** ──> 输入名称 **`reader-storage`** ──> 点击 **Create bucket**。
 
 ---
 
-### 途径 2：经典 Pages 独立控制台接入（“想要部署 Pages？开始使用”）
+### 第二步：导入 GitHub 仓库部署 Pages
 
-1. **入口路径**：
-   登录 Cloudflare 控制台 ──> 点击 **Workers & Pages** ──> 点击下方的文字按钮 **“想要部署 Pages？开始使用”** ──> 进入 Pages 专属页面 ──> 点击 **导入现有 Git 存储库**。
-2. **连接仓库**：
-   选择你的 GitHub 仓库，点击 **开始设置**。
-3. **手动填写构建参数（此入口平台不会自动预填，请严格按以下填写）**：
-   - **项目名称 (Project name)**：自定义（如 `reader-rust-pages`）
-   - **框架预设 (Framework preset)**：选择 `None` 或 `Vite`
-   - **构建命令 (Build command)**：输入 `npm run build`
-   - **构建输出目录 (Build output directory)**：输入 `frontend/dist`
-   - **根目录 (Root directory)**：保持根目录留空（代表仓库根目录 `/`）
-4. **手动添加环境变量**：
-   - 点击展开页面下方的 **环境变量 (Environment variables)** 折叠面板；
-   - 参考上面的字典，点击“添加变量”填入你的配置（如需保密勾选 Encrypt）。
-5. 点击 **保存并部署 (Save and Deploy)**。
+1. 登录 Cloudflare 控制台 ──> 点击左侧 **Workers & Pages** ──> 点击 **Create application** ──> 点击 **Connect to Git**（或通过经典 Pages 导入）；
+2. 选中你的 GitHub 仓库（`reader-rust-cf`），点击 **Begin setup**；
+3. **构建参数自动识别**（已由根目录 `vite.config.ts` 自动预填）：
+   - **Framework preset**: `Vite`
+   - **Build command**: `npm run build`
+   - **Build output directory**: `dist`
+4. 点击 **Save and Deploy** 完成初次编译发布。
 
 ---
 
-### 云端资源一键绑定（D1 数据库、R2 存储桶与 Workers AI）
+### 第三步：在 Pages 控制台一键绑定（控制台已解锁，直接下拉选择）
 
-无论通过上述哪种途径部署，首次构建完成后，需在项目控制台进行存储与算力绑定：
+首次部署完成后，进入该 Pages 项目的 **Settings**（设置）页面：
 
 1. **绑定 D1 数据库**：
-   - 进入项目 **Settings** ──> **Functions** ──> 找到 **D1 database bindings**；
+   - 进入 **Settings** ──> **Functions** ──> 找到 **D1 database bindings**；
    - 点击 **Add binding**：
-     - **Variable name（变量名）**：严格填写 `DB`
-     - **D1 database**：选择你的 `reader-db`（若未创建，在控制台 D1 页面一键新建并执行 `migrations/d1_schema.sql` 建表）。
+     - **Variable name（变量名）**：严格填写 **`DB`**
+     - **D1 database**：在下拉菜单中直接选中 **`reader-db`**（平台自动安全关联，无泄密风险）
 2. **绑定 R2 存储桶**：
    - 在同一页面的 **R2 bucket bindings** ──> 点击 **Add binding**：
-     - **Variable name（变量名）**：严格填写 `BUCKET`
-     - **R2 bucket**：选择你的 `reader-storage`。
+     - **Variable name（变量名）**：严格填写 **`BUCKET`**
+     - **R2 bucket**：在下拉菜单中直接选中 **`reader-storage`**
 3. **绑定 Workers AI 算力**：
    - 在同一页面的 **Workers AI bindings** ──> 点击 **Add binding**：
-     - **Variable name（变量名）**：严格填写 `AI`。
-4. **重新部署生效**：
-   切换到 **Deployments** 页面，点击最新记录右侧的三个点 ──> **Retry deployment**。部署完成后，你的云原生在线阅读站便正式在全球边缘网络上线运行！
-
----
-
-### 途径 3：本地命令行一键部署（`npm run deploy`）
-
-如果在本地终端安装并登录了 Wrangler，只需运行一条命令即可全自动创建 D1/R2/Queues 并完成部署：
-```bash
-npm run deploy
-```
+     - **Variable name（变量名）**：严格填写 **`AI`**
+4. **导入可选加密密钥（Secrets）**：
+   - 切换到 **Settings** ──> **Environment variables**，点击 **Add variable** 填入你的密钥（如 `CF_ACCOUNT_ID`、`CF_API_TOKEN`、`SECURE_KEY` 等），勾选 **Encrypt（加密存储）**。
+5. **重新部署生效**：
+   切换到 **Deployments** 页面，点击最新构建记录右侧的三个点 ──> 选择 **Retry deployment**。部署完成后全站正式在全球边缘网络上线运行！
 
 ---
 
