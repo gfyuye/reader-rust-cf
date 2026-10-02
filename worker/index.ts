@@ -3678,10 +3678,20 @@ async function handleGetUserList(request: Request, env: Env): Promise<Response> 
   }
 
   const rows = await env.DB.prepare(
-    `SELECT username, last_login_at as lastLoginAt, created_at as createdAt, enable_webdav as enableWebdav, enable_local_store as enableLocalStore, is_admin as isAdmin FROM users`
+    `SELECT username, last_login_at, created_at, enable_webdav, enable_local_store, enable_ai_model, is_admin FROM users ORDER BY created_at ASC`
   ).all<any>();
 
-  return jsonResponse({ isSuccess: true, data: rows.results || [] });
+  const list = (rows.results || []).map((r) => ({
+    username: r.username,
+    lastLoginAt: r.last_login_at || 0,
+    createdAt: r.created_at || 0,
+    enableWebdav: r.enable_webdav === 1,
+    enableLocalStore: r.enable_local_store === 1,
+    enableAiModel: r.enable_ai_model === 1,
+    isAdmin: r.is_admin === 1,
+  }));
+
+  return jsonResponse({ isSuccess: true, data: list });
 }
 
 async function handleAddUser(request: Request, env: Env): Promise<Response> {
@@ -3702,8 +3712,8 @@ async function handleAddUser(request: Request, env: Env): Promise<Response> {
   const now = Math.floor(Date.now() / 1000);
 
   await env.DB.prepare(
-    `INSERT INTO users (username, password, salt, token, last_login_at, created_at, enable_webdav, is_admin)
-     VALUES (?1, ?2, ?3, '', ?4, ?4, 1, 0)`
+    `INSERT INTO users (username, password, salt, token, last_login_at, created_at, enable_webdav, enable_local_store, enable_ai_model, is_admin)
+     VALUES (?1, ?2, ?3, '', ?4, ?4, 1, 1, 1, 0)`
   ).bind(username, encrypted, salt, now).run();
 
   return handleGetUserList(request, env);
@@ -3717,12 +3727,20 @@ async function handleUpdateUser(request: Request, env: Env): Promise<Response> {
     return jsonResponse({ isSuccess: false, errorMsg: "需要验证管理密码 (SecureKey)" });
   }
 
-  const { username, enableWebdav, enableLocalStore, isAdmin } = await request.json<any>();
+  const { username, enableWebdav, enableLocalStore, enableAiModel, isAdmin } = await request.json<any>();
+
+  const user = await env.DB.prepare(`SELECT * FROM users WHERE username = ?1`).bind(username).first<any>();
+  if (!user) return jsonResponse({ isSuccess: false, errorMsg: "用户不存在" });
+
+  const newWebdav = enableWebdav !== undefined ? (enableWebdav ? 1 : 0) : user.enable_webdav;
+  const newLocal = enableLocalStore !== undefined ? (enableLocalStore ? 1 : 0) : user.enable_local_store;
+  const newAi = enableAiModel !== undefined ? (enableAiModel ? 1 : 0) : user.enable_ai_model;
+  const newAdmin = isAdmin !== undefined ? (isAdmin ? 1 : 0) : user.is_admin;
 
   await env.DB.prepare(
-    `UPDATE users SET enable_webdav = ?1, enable_local_store = ?2, is_admin = ?3 WHERE username = ?4`
+    `UPDATE users SET enable_webdav = ?1, enable_local_store = ?2, enable_ai_model = ?3, is_admin = ?4 WHERE username = ?5`
   )
-    .bind(enableWebdav ? 1 : 0, enableLocalStore ? 1 : 0, isAdmin ? 1 : 0, username)
+    .bind(newWebdav, newLocal, newAi, newAdmin, username)
     .run();
 
   return handleGetUserList(request, env);
