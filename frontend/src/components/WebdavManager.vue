@@ -52,6 +52,16 @@
               </button>
             </div>
 
+            <div v-if="uploadProgress !== null" class="upload-progress-card">
+              <div class="progress-info">
+                <span>正在上传文件...</span>
+                <strong>{{ uploadProgress }}%</strong>
+              </div>
+              <div class="progress-track">
+                <div class="progress-fill" :style="{ width: uploadProgress + '%' }"></div>
+              </div>
+            </div>
+
             <div class="path-bar">
               <span class="path-label">当前目录</span>
               <code>{{ currentPath }}</code>
@@ -134,7 +144,6 @@
 import { computed, ref, watch } from 'vue'
 import { useAppStore } from '../stores/app'
 import { useBookshelfStore } from '../stores/bookshelf'
-import http from '../api/http'
 import {
   deleteWebdavFile,
   deleteWebdavFileList,
@@ -142,6 +151,7 @@ import {
   getWebdavFileList,
   type WebdavFileEntry,
   uploadFilesToWebdav,
+  importWebdavBook,
 } from '../api/webdav'
 import {
   createLegadoBackupZip,
@@ -295,15 +305,21 @@ function triggerUpload() {
   fileInputRef.value?.click()
 }
 
+const uploadProgress = ref<number | null>(null)
+
 async function handleUpload(event: Event) {
   const input = event.target as HTMLInputElement
   const files = Array.from(input.files || [])
   if (!files.length) return
   working.value = true
+  uploadProgress.value = 0
   try {
     await uploadFilesToWebdav(
       files.map((file) => ({ file, name: file.name })),
       currentPath.value,
+      (percent) => {
+        uploadProgress.value = percent
+      }
     )
     appStore.showToast('文件已上传到服务器', 'success')
     await loadFiles(currentPath.value)
@@ -311,6 +327,7 @@ async function handleUpload(event: Event) {
     appStore.showToast((error as Error).message || '上传失败', 'error')
   } finally {
     working.value = false
+    uploadProgress.value = null
     input.value = ''
   }
 }
@@ -411,41 +428,15 @@ async function restoreBackup(entry: EntryRow) {
 async function importToShelf(entry: EntryRow) {
   working.value = true
   try {
-    const blob = await getWebdavFileBlob(entry.path)
-    const lower = entry.name.toLowerCase()
-
-    if (lower.endsWith('.txt')) {
-      const formData = new FormData()
-      formData.append('file', blob, entry.name)
-      await http.post('/uploadLocalBook', formData)
-    } else if (lower.endsWith('.epub')) {
-      const formData = new FormData()
-      formData.append('file', blob, entry.name)
-      await http.post('/uploadLocalBook', formData)
-    } else if (lower.endsWith('.pdf')) {
-      const resp = await fetch('/reader3/pdf/upload', {
-        method: 'POST',
-        headers: {
-          'X-File-Name': encodeURIComponent(entry.name),
-          'X-User-NS': appStore.userInfo?.username || 'default',
-        },
-        body: blob,
-      })
-      if (!resp.ok) throw new Error('PDF 导入失败')
-    } else if (lower.endsWith('.mobi') || lower.endsWith('.prc')) {
-      const resp = await fetch('/reader3/mobi/upload', {
-        method: 'POST',
-        headers: {
-          'X-File-Name': encodeURIComponent(entry.name),
-          'X-User-NS': appStore.userInfo?.username || 'default',
-        },
-        body: blob,
-      })
-      if (!resp.ok) throw new Error('MOBI 导入失败')
-    }
-
-    appStore.showToast(`已成功将《${entry.name}》导入至书架`, 'success')
-    await shelfStore.fetchBooks()
+    const res = await importWebdavBook(entry.path, entry.name)
+    const msg = res?.moved
+      ? `已将《${entry.name}》移动至 /book 目录并成功加入书架`
+      : `已成功将《${entry.name}》导入至书架`
+    appStore.showToast(msg, 'success')
+    await Promise.all([
+      shelfStore.fetchBooks().catch(() => undefined),
+      loadFiles(currentPath.value).catch(() => undefined),
+    ])
   } catch (error: any) {
     appStore.showToast(error.message || '导入书架失败', 'error')
   } finally {
@@ -540,6 +531,37 @@ async function importToShelf(entry: EntryRow) {
   gap: var(--space-3);
   padding: var(--space-4) var(--space-6);
   border-bottom: 1px solid var(--color-divider);
+}
+
+.upload-progress-card {
+  margin: var(--space-2) var(--space-6);
+  padding: var(--space-2) var(--space-3);
+  background: rgba(var(--color-primary-rgb, 14, 165, 233), 0.08);
+  border: 1px solid rgba(var(--color-primary-rgb, 14, 165, 233), 0.3);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.progress-info {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--text-xs);
+  color: var(--color-primary);
+}
+
+.progress-track {
+  height: 6px;
+  background: var(--color-bg-sunken);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--color-primary);
+  transition: width 0.15s ease-out;
 }
 
 .toolbar-left {

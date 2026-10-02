@@ -90,7 +90,7 @@
       <input
         ref="localBookFileInputRef"
         type="file"
-        accept=".txt,.epub,text/plain,application/epub+zip"
+        accept=".txt,.epub,.pdf,.mobi,.prc,text/plain,application/epub+zip,application/pdf,application/x-mobipocket-ebook"
         class="hidden-input"
         @change="handleLocalBookFileChange"
       />
@@ -171,7 +171,7 @@ import { useRouter } from 'vue-router'
 import { useBookshelfStore } from '../stores/bookshelf'
 import { useReaderStore } from '../stores/reader'
 import { useAppStore } from '../stores/app'
-import { uploadEpubBook, uploadTxtBook } from '../api/bookshelf'
+import { uploadEpubBook, uploadMobiBook, uploadPdfBook, uploadTxtBook } from '../api/bookshelf'
 import BookGrid from '../components/BookGrid.vue'
 import BookDetailModal from '../components/BookDetailModal.vue'
 import GroupSelectModal from '../components/bookshelf/GroupSelectModal.vue'
@@ -221,16 +221,29 @@ async function handleLocalBookFileChange(event: Event) {
   if (!file) return
 
   const lowerName = file.name.toLowerCase()
-  if (!lowerName.endsWith('.txt') && !lowerName.endsWith('.epub')) {
-    appStore.showToast('只支持导入 .txt 或 .epub 文件', 'warning')
+  if (
+    !lowerName.endsWith('.txt') &&
+    !lowerName.endsWith('.epub') &&
+    !lowerName.endsWith('.pdf') &&
+    !lowerName.endsWith('.mobi') &&
+    !lowerName.endsWith('.prc')
+  ) {
+    appStore.showToast('只支持导入 .txt, .epub, .pdf, .mobi 文件', 'warning')
     return
   }
 
   localBookUploading.value = true
   try {
-    const book = lowerName.endsWith('.epub')
-      ? await uploadEpubBook(file)
-      : await uploadTxtBook(file)
+    let book: Book
+    if (lowerName.endsWith('.epub')) {
+      book = await uploadEpubBook(file)
+    } else if (lowerName.endsWith('.txt')) {
+      book = await uploadTxtBook(file)
+    } else if (lowerName.endsWith('.pdf')) {
+      book = await uploadPdfBook(file)
+    } else {
+      book = await uploadMobiBook(file)
+    }
     await shelfStore.fetchBooks()
     appStore.showToast(`已导入《${book.name}》`, 'success')
     await handleBookClick(book)

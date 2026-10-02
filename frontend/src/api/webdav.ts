@@ -29,7 +29,11 @@ export function getWebdavFileBlob(path: string) {
   }).then((r) => r.data)
 }
 
-export function uploadFilesToWebdav(files: Array<{ file: Blob; name: string }>, path = '/') {
+export function uploadFilesToWebdav(
+  files: Array<{ file: Blob; name: string }>,
+  path = '/',
+  onProgress?: (percent: number) => void
+) {
   const formData = new FormData()
   formData.append('path', path)
   files.forEach((item, index) => {
@@ -39,7 +43,17 @@ export function uploadFilesToWebdav(files: Array<{ file: Blob; name: string }>, 
     headers: {
       'Content-Type': 'multipart/form-data',
     },
+    onUploadProgress: (progressEvent) => {
+      if (onProgress && progressEvent.total) {
+        const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total)
+        onProgress(percent)
+      }
+    },
   }).then((r) => r.data)
+}
+
+export function importWebdavBook(path: string, name: string) {
+  return http.post<any>('/importWebdavBook', { path, name }).then((r) => r.data)
 }
 
 export function uploadTextToWebdav(content: string, filename: string, path = '/') {

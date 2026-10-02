@@ -110,7 +110,7 @@ export default {
       }
 
       // 3. Bookshelf & Reading Progress (书架与进度 - D1)
-      if (path === "/reader3/getBookshelf" && request.method === "GET") {
+      if ((path === "/reader3/getBookshelf" || path === "/reader3/getShelfBookWithCacheInfo") && request.method === "GET") {
         return handleGetBookshelf(request, env);
       }
       if (path === "/reader3/saveBook" && request.method === "POST") {
@@ -160,7 +160,7 @@ export default {
       if (path === "/reader3/deleteBookGroup" && request.method === "POST") return handleDeleteDocumentItem(request, env, "bookGroup.json", ctx);
 
       // 6. EPUB Streaming & Indexing
-      if (path === "/reader3/epub/upload" && request.method === "POST") return handleEpubUpload(request, env);
+      if ((path === "/reader3/epub/upload" || path === "/reader3/uploadEpubBook") && request.method === "POST") return handleEpubUpload(request, env);
       if (path === "/reader3/epub/read" && request.method === "GET") {
         const bookId = url.searchParams.get("bookId") || "";
         const pageIndex = parseInt(url.searchParams.get("page") || "0", 10);
@@ -171,13 +171,13 @@ export default {
       }
 
       // 7. PDF Streaming & TOC
-      if (path === "/reader3/pdf/upload" && request.method === "POST") return handlePdfUpload(request, env);
+      if ((path === "/reader3/pdf/upload" || path === "/reader3/uploadPdfBook") && request.method === "POST") return handlePdfUpload(request, env);
       if (path === "/reader3/pdf/stream" && request.method === "GET") return handlePdfStream(request, env);
       if (path === "/reader3/pdf/info" && request.method === "GET") return handlePdfInfo(url.searchParams.get("bookId") || "", env);
       if (path === "/reader3/pdf/toc" && request.method === "GET") return handlePdfToc(url.searchParams.get("bookId") || "", env);
 
       // 8. MOBI Streaming
-      if (path === "/reader3/mobi/upload" && request.method === "POST") return handleMobiUpload(request, env);
+      if ((path === "/reader3/mobi/upload" || path === "/reader3/uploadMobiBook") && request.method === "POST") return handleMobiUpload(request, env);
       if (path === "/reader3/mobi/read" && request.method === "GET") {
         const bookId = url.searchParams.get("bookId") || "";
         const pageIndex = parseInt(url.searchParams.get("page") || "0", 10);
@@ -186,7 +186,7 @@ export default {
       if (path === "/reader3/mobi/info" && request.method === "GET") return handleMobiInfo(url.searchParams.get("bookId") || "", env);
 
       // 9. TXT Streaming & Heading Indexing
-      if ((path === "/reader3/txt/upload" || path === "/reader3/uploadLocalBook") && request.method === "POST") {
+      if ((path === "/reader3/txt/upload" || path === "/reader3/uploadLocalBook" || path === "/reader3/uploadTxtBook") && request.method === "POST") {
         return handleTxtUpload(request, env, ctx);
       }
       if (path === "/reader3/txt/read" && request.method === "GET") {
@@ -196,6 +196,11 @@ export default {
       }
       if (path === "/reader3/txt/info" && request.method === "GET") {
         return handleTxtInfo(url.searchParams.get("bookId") || "", env);
+      }
+
+      // 10. WebDAV Book Import & Move
+      if (path === "/reader3/importWebdavBook" && request.method === "POST") {
+        return handleImportWebdavBook(request, env, ctx);
       }
 
       // 10. Assets & Covers (R2)
@@ -945,11 +950,25 @@ async function handleEpubUpload(request: Request, env: Env): Promise<Response> {
   try {
     const userNs = await resolveUserNs(request, env);
     if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
-    const fileName = request.headers.get("X-File-Name") || "book.epub";
-    const bookId = `epub_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-    const r2Key = `epubs/${userNs}/${bookId}.epub`;
 
-    const bodyBytes = await request.arrayBuffer();
+    let fileName = "book.epub";
+    let bodyBytes: Uint8Array;
+    const contentType = request.headers.get("Content-Type") || "";
+    if (contentType.includes("multipart/form-data")) {
+      const formData = await request.formData();
+      const file = formData.get("file") as File | null;
+      if (!file) return jsonResponse({ isSuccess: false, errorMsg: "缺少 EPUB 文件" });
+      fileName = file.name || "book.epub";
+      bodyBytes = new Uint8Array(await file.arrayBuffer());
+    } else {
+      const rawHeaderName = request.headers.get("X-File-Name");
+      fileName = rawHeaderName ? decodeURIComponent(rawHeaderName) : "book.epub";
+      bodyBytes = new Uint8Array(await request.arrayBuffer());
+    }
+
+    const safeName = fileName.replace(/[/\\?%*:|"<>]/g, "_");
+    const bookId = `epub_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    const r2Key = `webdav/${userNs}/book/${safeName}`;
     const fileSize = bodyBytes.byteLength;
 
     await env.BUCKET.put(r2Key, bodyBytes, {
@@ -1029,9 +1048,32 @@ async function handleEpubUpload(request: Request, env: Env): Promise<Response> {
       .bind(bookId, userNs, fileName, r2Key, fileSize, totalChapters, title, author, now, now)
       .run();
 
+    const bookUrl = `local-epub:${bookId}`;
+    const newBook = {
+      name: title,
+      author: author,
+      bookUrl,
+      origin: "local-epub",
+      originName: "本地 EPUB",
+      tocUrl: bookUrl,
+      canUpdate: false,
+      durChapterIndex: 0,
+      durChapterPos: 0,
+      durChapterTitle: "第 1 节",
+      durChapterTime: Date.now(),
+      totalChapterNum: totalChapters,
+      kind: "本地EPUB",
+    };
+
+    let shelf: any[] = (await getDocument(env, userNs, "bookshelf.json")) || [];
+    const idx = shelf.findIndex((b) => b.bookUrl === bookUrl);
+    if (idx >= 0) shelf[idx] = newBook;
+    else shelf.unshift(newBook);
+    await saveDocument(env, userNs, "bookshelf.json", shelf);
+
     return jsonResponse({
       isSuccess: true,
-      data: { bookId, fileName, title, author, totalChapters, status: "ready" },
+      data: newBook,
     });
   } catch (err: any) {
     return jsonResponse({ isSuccess: false, errorMsg: err.message });
@@ -1209,25 +1251,33 @@ async function handlePdfUpload(request: Request, env: Env): Promise<Response> {
   try {
     const userNs = await resolveUserNs(request, env);
     if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
-    const fileName = request.headers.get("X-File-Name") || "book.pdf";
-    const bookId = `pdf_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-    const r2Key = `pdfs/${userNs}/${bookId}.pdf`;
 
-    const bodyBytes = await request.arrayBuffer();
-    const fileSize = bodyBytes.byteLength;
+    let fileName = "book.pdf";
+    let bodyBytes: Uint8Array;
+    const contentType = request.headers.get("Content-Type") || "";
+    if (contentType.includes("multipart/form-data")) {
+      const formData = await request.formData();
+      const file = formData.get("file") as File | null;
+      if (!file) return jsonResponse({ isSuccess: false, errorMsg: "缺少 PDF 文件" });
+      fileName = file.name || "book.pdf";
+      bodyBytes = new Uint8Array(await file.arrayBuffer());
+    } else {
+      const rawHeaderName = request.headers.get("X-File-Name");
+      fileName = rawHeaderName ? decodeURIComponent(rawHeaderName) : "book.pdf";
+      bodyBytes = new Uint8Array(await request.arrayBuffer());
+    }
+
+    const safeName = fileName.replace(/[/\\?%*:|"<>]/g, "_");
+    const bookId = `pdf_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    const r2Key = `webdav/${userNs}/book/${safeName}`;
 
     await env.BUCKET.put(r2Key, bodyBytes, {
       httpMetadata: { contentType: "application/pdf" },
     });
 
+    const fileSize = bodyBytes.byteLength;
     const tailSize = Math.min(65536, fileSize);
-    const tailObj = await env.BUCKET.get(r2Key, {
-      range: { offset: fileSize - tailSize, length: tailSize },
-    });
-    if (!tailObj) return jsonResponse({ isSuccess: false, errorMsg: "无法读取 R2 数据" });
-
-    const tailBytes = new Uint8Array(await tailObj.arrayBuffer());
-    const tailText = new TextDecoder().decode(tailBytes);
+    const tailText = new TextDecoder().decode(bodyBytes.subarray(fileSize - tailSize));
 
     const countMatch = tailText.match(/\/Count\s+(\d+)/);
     const totalPages = countMatch ? parseInt(countMatch[1], 10) : 1;
@@ -1243,9 +1293,32 @@ async function handlePdfUpload(request: Request, env: Env): Promise<Response> {
        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'ready', ?9, ?10)`
     ).bind(bookId, userNs, fileName, r2Key, fileSize, totalPages, title, author, now, now).run();
 
+    const bookUrl = `local-pdf:${bookId}`;
+    const newBook = {
+      name: title,
+      author: author,
+      bookUrl,
+      origin: "local-pdf",
+      originName: "本地 PDF",
+      tocUrl: bookUrl,
+      canUpdate: false,
+      durChapterIndex: 1,
+      durChapterPos: 0,
+      durChapterTitle: "第 1 页",
+      durChapterTime: Date.now(),
+      totalChapterNum: totalPages,
+      kind: "本地PDF",
+    };
+
+    let shelf: any[] = (await getDocument(env, userNs, "bookshelf.json")) || [];
+    const idx = shelf.findIndex((b) => b.bookUrl === bookUrl);
+    if (idx >= 0) shelf[idx] = newBook;
+    else shelf.unshift(newBook);
+    await saveDocument(env, userNs, "bookshelf.json", shelf);
+
     return jsonResponse({
       isSuccess: true,
-      data: { bookId, fileName, title, author, totalPages, status: "ready" },
+      data: newBook,
     });
   } catch (err: any) {
     return jsonResponse({ isSuccess: false, errorMsg: err.message });
@@ -1338,38 +1411,39 @@ async function handleMobiUpload(request: Request, env: Env): Promise<Response> {
   try {
     const userNs = await resolveUserNs(request, env);
     if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
-    const fileName = request.headers.get("X-File-Name") || "book.mobi";
-    const bookId = `mobi_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-    const r2Key = `mobis/${userNs}/${bookId}.mobi`;
 
-    const bodyBytes = await request.arrayBuffer();
-    const fileSize = bodyBytes.byteLength;
+    let fileName = "book.mobi";
+    let bodyBytes: Uint8Array;
+    const contentType = request.headers.get("Content-Type") || "";
+    if (contentType.includes("multipart/form-data")) {
+      const formData = await request.formData();
+      const file = formData.get("file") as File | null;
+      if (!file) return jsonResponse({ isSuccess: false, errorMsg: "缺少 MOBI 文件" });
+      fileName = file.name || "book.mobi";
+      bodyBytes = new Uint8Array(await file.arrayBuffer());
+    } else {
+      const rawHeaderName = request.headers.get("X-File-Name");
+      fileName = rawHeaderName ? decodeURIComponent(rawHeaderName) : "book.mobi";
+      bodyBytes = new Uint8Array(await request.arrayBuffer());
+    }
+
+    const safeName = fileName.replace(/[/\\?%*:|"<>]/g, "_");
+    const bookId = `mobi_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    const r2Key = `webdav/${userNs}/book/${safeName}`;
 
     await env.BUCKET.put(r2Key, bodyBytes, {
       httpMetadata: { contentType: "application/x-mobipocket-ebook" },
     });
 
-    const headSize = Math.min(16384, fileSize);
-    const headObj = await env.BUCKET.get(r2Key, { range: { offset: 0, length: headSize } });
-    if (!headObj) return jsonResponse({ isSuccess: false, errorMsg: "无法读取 R2 数据" });
-
-    const headBytes = new Uint8Array(await headObj.arrayBuffer());
-    const pdb = parsePdbRecords(headBytes, fileSize);
+    const fileSize = bodyBytes.byteLength;
+    const pdb = parsePdbRecords(bodyBytes.subarray(0, 16384), fileSize);
     if (!pdb || pdb.recordOffsets.length === 0) {
       return jsonResponse({ isSuccess: false, errorMsg: "非法 MOBI 文件" });
     }
 
     const rec0Offset = pdb.recordOffsets[0];
     const rec0Len = pdb.recordOffsets.length > 1 ? pdb.recordOffsets[1] - rec0Offset : fileSize - rec0Offset;
-    let rec0Bytes: Uint8Array;
-    if (rec0Offset + rec0Len <= headBytes.length) {
-      rec0Bytes = headBytes.subarray(rec0Offset, rec0Offset + rec0Len);
-    } else {
-      const rec0Obj = await env.BUCKET.get(r2Key, { range: { offset: rec0Offset, length: rec0Len } });
-      if (!rec0Obj) return jsonResponse({ isSuccess: false, errorMsg: "读取描述符失败" });
-      rec0Bytes = new Uint8Array(await rec0Obj.arrayBuffer());
-    }
-
+    const rec0Bytes = bodyBytes.subarray(rec0Offset, rec0Offset + rec0Len);
     const mobiHeader = parseMobiHeader(rec0Bytes);
     const title = mobiHeader.title || fileName.replace(/\.(mobi|prc)$/i, "");
     const totalChapters = Math.min(mobiHeader.textRecordCount, pdb.recordOffsets.length - 1);
@@ -1397,9 +1471,32 @@ async function handleMobiUpload(request: Request, env: Env): Promise<Response> {
       await env.DB.batch(stmts.slice(i, i + 50));
     }
 
+    const bookUrl = `local-mobi:${bookId}`;
+    const newBook = {
+      name: title,
+      author: "未知作者",
+      bookUrl,
+      origin: "local-mobi",
+      originName: "本地 MOBI",
+      tocUrl: bookUrl,
+      canUpdate: false,
+      durChapterIndex: 0,
+      durChapterPos: 0,
+      durChapterTitle: "第 1 节",
+      durChapterTime: Date.now(),
+      totalChapterNum: totalChapters,
+      kind: "本地MOBI",
+    };
+
+    let shelf: any[] = (await getDocument(env, userNs, "bookshelf.json")) || [];
+    const idx = shelf.findIndex((b) => b.bookUrl === bookUrl);
+    if (idx >= 0) shelf[idx] = newBook;
+    else shelf.unshift(newBook);
+    await saveDocument(env, userNs, "bookshelf.json", shelf);
+
     return jsonResponse({
       isSuccess: true,
-      data: { bookId, fileName, title, totalChapters, status: "ready" },
+      data: newBook,
     });
   } catch (err: any) {
     return jsonResponse({ isSuccess: false, errorMsg: err.message });
@@ -2111,6 +2208,24 @@ async function handleWebdav(request: Request, env: Env): Promise<Response> {
     return new Response(method === "HEAD" ? null : obj.body, { status: 200, headers });
   }
 
+  // MOVE: Move/Rename file in R2
+  if (method === "MOVE") {
+    const destination = request.headers.get("Destination") || "";
+    const destMatch = destination.match(/\/reader3\/webdav\/?(.*)/);
+    if (!destMatch) return new Response("Bad Destination", { status: 400, headers: corsHeaders() });
+    const targetClean = destMatch[1].replace(/^\/+/, "");
+    const targetKey = `webdav/${userNs}/${targetClean}`;
+
+    const sourceObj = await env.BUCKET.get(r2Key);
+    if (!sourceObj) return new Response("Not Found", { status: 404, headers: corsHeaders() });
+
+    await env.BUCKET.put(targetKey, sourceObj.body, {
+      httpMetadata: sourceObj.httpMetadata,
+    });
+    await env.BUCKET.delete(r2Key);
+    return new Response(null, { status: 201, headers: corsHeaders() });
+  }
+
   // 6. DELETE: Remove File or Directory
   if (method === "DELETE") {
     await env.BUCKET.delete(r2Key);
@@ -2793,8 +2908,9 @@ async function handleTxtUpload(request: Request, env: Env, ctx: ExecutionContext
     const utf8Bytes = new TextEncoder().encode(text);
     const fileSize = utf8Bytes.length;
 
+    const safeName = fileName.replace(/[/\\?%*:|"<>]/g, "_");
     const bookId = `txt_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-    const r2Key = `txts/${userNs}/${bookId}.txt`;
+    const r2Key = `webdav/${userNs}/book/${safeName}`;
 
     // 3. Store UTF-8 text into R2
     await env.BUCKET.put(r2Key, utf8Bytes, {
@@ -2918,6 +3034,246 @@ async function handleTxtInfo(bookId: string, env: Env): Promise<Response> {
 
   if (!book) return jsonResponse({ isSuccess: false, errorMsg: "未找到该 TXT 书籍" });
   return jsonResponse({ isSuccess: true, data: book });
+}
+
+async function handleImportWebdavBook(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const userNs = await resolveUserNs(request, env);
+  if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
+
+  const { path: relPath, name } = await request.json<any>();
+  if (!name) return jsonResponse({ isSuccess: false, errorMsg: "缺少文件名" });
+
+  const cleanRel = (relPath || "").replace(/^\/+/, "");
+  const sourceKey = `webdav/${userNs}/${cleanRel}`;
+  const targetClean = cleanRel.startsWith("book/") ? cleanRel : `book/${name}`;
+  const targetKey = `webdav/${userNs}/${targetClean}`;
+
+  // 1. Move file to /book/ if not already inside it
+  const moved = sourceKey !== targetKey;
+  if (moved) {
+    const sourceObj = await env.BUCKET.get(sourceKey);
+    if (!sourceObj) return jsonResponse({ isSuccess: false, errorMsg: "WebDAV 文件未找到" });
+    await env.BUCKET.put(targetKey, sourceObj.body, {
+      httpMetadata: sourceObj.httpMetadata,
+    });
+    await env.BUCKET.delete(sourceKey);
+  }
+
+  // 2. Fetch target object from R2 to index
+  const targetObj = await env.BUCKET.get(targetKey);
+  if (!targetObj) return jsonResponse({ isSuccess: false, errorMsg: "无法读取目标书籍文件" });
+
+  const bodyBytes = new Uint8Array(await targetObj.arrayBuffer());
+  const fileSize = bodyBytes.length;
+  const lower = name.toLowerCase();
+
+  let newBook: any = null;
+
+  if (lower.endsWith(".txt")) {
+    const text = decodeTxtBytes(bodyBytes);
+    const utf8Bytes = new TextEncoder().encode(text);
+    await env.BUCKET.put(targetKey, utf8Bytes, { httpMetadata: { contentType: "text/plain; charset=utf-8" } });
+
+    const bookId = `txt_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    const chapters = scanTxtChapterOffsets(text, utf8Bytes);
+    const title = name.replace(/\.txt$/i, "");
+    const now = Math.floor(Date.now() / 1000);
+
+    await env.DB.prepare(
+      `INSERT INTO txt_books (book_id, user_ns, file_name, r2_key, file_size, total_chapters, title, author, status, created_at, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '本地导入', 'ready', ?8, ?9)
+       ON CONFLICT(book_id) DO UPDATE SET file_size=excluded.file_size, total_chapters=excluded.total_chapters, title=excluded.title, updated_at=excluded.updated_at`
+    ).bind(bookId, userNs, name, targetKey, utf8Bytes.length, chapters.length, title, now, now).run();
+
+    const stmts = chapters.map((ch, idx) =>
+      env.DB.prepare(
+        `INSERT INTO txt_chapters (book_id, chapter_index, title, byte_offset, byte_length, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(book_id, chapter_index) DO UPDATE SET byte_offset=excluded.byte_offset, byte_length=excluded.byte_length`
+      ).bind(bookId, idx, ch.title, ch.offset, ch.length, now)
+    );
+    for (let i = 0; i < stmts.length; i += 50) {
+      await env.DB.batch(stmts.slice(i, i + 50));
+    }
+
+    const bookUrl = `local-txt:${bookId}`;
+    newBook = {
+      name: title,
+      author: "本地导入",
+      bookUrl,
+      origin: "local-txt",
+      originName: "本地 TXT",
+      tocUrl: bookUrl,
+      canUpdate: false,
+      durChapterIndex: 0,
+      durChapterPos: 0,
+      durChapterTitle: chapters[0]?.title || "第一章",
+      durChapterTime: Date.now(),
+      totalChapterNum: chapters.length,
+      latestChapterTitle: chapters[chapters.length - 1]?.title,
+      kind: "本地TXT",
+      wordCount: `${text.length}字`,
+    };
+  } else if (lower.endsWith(".epub")) {
+    const bookId = `epub_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    const tailSize = Math.min(65536, fileSize);
+    const tailBytes = bodyBytes.subarray(fileSize - tailSize);
+    const eocd = findEOCD(tailBytes, fileSize);
+    if (!eocd) return jsonResponse({ isSuccess: false, errorMsg: "未找到 EPUB EOCD 记录" });
+
+    const cdBytes = bodyBytes.subarray(eocd.cdOffset, eocd.cdOffset + eocd.cdSize);
+    const entries = parseCentralDirectory(cdBytes);
+    const entryMap = new Map(entries.map((e) => [e.fileName, e]));
+
+    const containerEntry = entries.find((e) => e.fileName === "META-INF/container.xml");
+    if (!containerEntry) return jsonResponse({ isSuccess: false, errorMsg: "缺少 container.xml" });
+    const containerXml = await readZipEntryText(targetKey, containerEntry, env);
+    const opfPath = parseContainerOpfPath(containerXml);
+    if (!opfPath) return jsonResponse({ isSuccess: false, errorMsg: "缺少 OPF 路径" });
+
+    const opfEntry = entries.find((e) => e.fileName === opfPath);
+    if (!opfEntry) return jsonResponse({ isSuccess: false, errorMsg: `缺少 OPF 文件: ${opfPath}` });
+    const opfXml = await readZipEntryText(targetKey, opfEntry, env);
+    const opfDir = opfPath.includes("/") ? opfPath.substring(0, opfPath.lastIndexOf("/")) : "";
+    const { title, author, spinePaths } = parseOpfPackage(opfXml, opfDir);
+
+    const now = Math.floor(Date.now() / 1000);
+    const stmts = [];
+    for (let i = 0; i < spinePaths.length; i++) {
+      const path = spinePaths[i];
+      const entry = entryMap.get(path);
+      if (entry) {
+        const dataOffset = entry.localHeaderOffset + 30 + new TextEncoder().encode(path).length;
+        stmts.push(
+          env.DB.prepare(
+            `INSERT INTO epub_chapters (book_id, chapter_index, title, file_name, byte_offset, byte_length, uncompressed_length, compression_method, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`
+          ).bind(bookId, i, `第 ${i + 1} 节`, path, dataOffset, entry.compressedSize, entry.uncompressedSize, entry.compressionMethod, now)
+        );
+      }
+    }
+    for (let i = 0; i < stmts.length; i += 50) {
+      await env.DB.batch(stmts.slice(i, i + 50));
+    }
+
+    await env.DB.prepare(
+      `INSERT INTO epub_books (book_id, user_ns, file_name, r2_key, file_size, status, total_chapters, parsed_chapters, title, author, created_at, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, 'ready', ?6, ?6, ?7, ?8, ?9, ?10)`
+    ).bind(bookId, userNs, name, targetKey, fileSize, spinePaths.length, title, author, now, now).run();
+
+    const bookUrl = `local-epub:${bookId}`;
+    newBook = {
+      name: title,
+      author: author,
+      bookUrl,
+      origin: "local-epub",
+      originName: "本地 EPUB",
+      tocUrl: bookUrl,
+      canUpdate: false,
+      durChapterIndex: 0,
+      durChapterPos: 0,
+      durChapterTitle: "第 1 节",
+      durChapterTime: Date.now(),
+      totalChapterNum: spinePaths.length,
+      kind: "本地EPUB",
+    };
+  } else if (lower.endsWith(".pdf")) {
+    const bookId = `pdf_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    const tailSize = Math.min(65536, fileSize);
+    const tailText = new TextDecoder().decode(bodyBytes.subarray(fileSize - tailSize));
+    const countMatch = tailText.match(/\/Count\s+(\d+)/);
+    const totalPages = countMatch ? parseInt(countMatch[1], 10) : 1;
+    const titleMatch = tailText.match(/\/Title\s*\(([^)]+)\)/);
+    const authorMatch = tailText.match(/\/Author\s*\(([^)]+)\)/);
+    const title = titleMatch ? titleMatch[1].trim() : name.replace(/\.pdf$/i, "");
+    const author = authorMatch ? authorMatch[1].trim() : "未知作者";
+    const now = Math.floor(Date.now() / 1000);
+
+    await env.DB.prepare(
+      `INSERT INTO pdf_books (book_id, user_ns, file_name, r2_key, file_size, total_pages, title, author, status, created_at, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'ready', ?9, ?10)`
+    ).bind(bookId, userNs, name, targetKey, fileSize, totalPages, title, author, now, now).run();
+
+    const bookUrl = `local-pdf:${bookId}`;
+    newBook = {
+      name: title,
+      author: author,
+      bookUrl,
+      origin: "local-pdf",
+      originName: "本地 PDF",
+      tocUrl: bookUrl,
+      canUpdate: false,
+      durChapterIndex: 1,
+      durChapterPos: 0,
+      durChapterTitle: "第 1 页",
+      durChapterTime: Date.now(),
+      totalChapterNum: totalPages,
+      kind: "本地PDF",
+    };
+  } else if (lower.endsWith(".mobi") || lower.endsWith(".prc")) {
+    const bookId = `mobi_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    const pdb = parsePdbRecords(bodyBytes.subarray(0, 16384), fileSize);
+    if (!pdb || pdb.recordOffsets.length === 0) return jsonResponse({ isSuccess: false, errorMsg: "非法 MOBI 文件" });
+    const rec0Offset = pdb.recordOffsets[0];
+    const rec0Len = pdb.recordOffsets.length > 1 ? pdb.recordOffsets[1] - rec0Offset : fileSize - rec0Offset;
+    const rec0Bytes = bodyBytes.subarray(rec0Offset, rec0Offset + rec0Len);
+    const mobiHeader = parseMobiHeader(rec0Bytes);
+    const title = mobiHeader.title || name.replace(/\.(mobi|prc)$/i, "");
+    const totalChapters = Math.min(mobiHeader.textRecordCount, pdb.recordOffsets.length - 1);
+    const now = Math.floor(Date.now() / 1000);
+
+    await env.DB.prepare(
+      `INSERT INTO mobi_books (book_id, user_ns, file_name, r2_key, file_size, total_chapters, title, author, compression, status, created_at, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '未知作者', ?8, 'ready', ?9, ?10)`
+    ).bind(bookId, userNs, name, targetKey, fileSize, totalChapters, title, mobiHeader.compression, now, now).run();
+
+    const stmts = [];
+    for (let i = 1; i <= totalChapters; i++) {
+      if (i >= pdb.recordOffsets.length) break;
+      const byteOffset = pdb.recordOffsets[i];
+      const byteLength = i + 1 < pdb.recordOffsets.length ? pdb.recordOffsets[i + 1] - byteOffset : fileSize - byteOffset;
+      stmts.push(
+        env.DB.prepare(
+          `INSERT INTO mobi_chapters (book_id, chapter_index, title, byte_offset, byte_length, compression, created_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`
+        ).bind(bookId, i - 1, `第 ${i} 节`, byteOffset, byteLength, mobiHeader.compression, now)
+      );
+    }
+    for (let i = 0; i < stmts.length; i += 50) {
+      await env.DB.batch(stmts.slice(i, i + 50));
+    }
+
+    const bookUrl = `local-mobi:${bookId}`;
+    newBook = {
+      name: title,
+      author: "未知作者",
+      bookUrl,
+      origin: "local-mobi",
+      originName: "本地 MOBI",
+      tocUrl: bookUrl,
+      canUpdate: false,
+      durChapterIndex: 0,
+      durChapterPos: 0,
+      durChapterTitle: "第 1 节",
+      durChapterTime: Date.now(),
+      totalChapterNum: totalChapters,
+      kind: "本地MOBI",
+    };
+  }
+
+  if (newBook) {
+    let shelf: any[] = (await getDocument(env, userNs, "bookshelf.json")) || [];
+    const idx = shelf.findIndex((b) => b.bookUrl === newBook.bookUrl);
+    if (idx >= 0) shelf[idx] = newBook;
+    else shelf.unshift(newBook);
+    await saveDocument(env, userNs, "bookshelf.json", shelf);
+    triggerOnChangeSync(env, userNs, ctx);
+  }
+
+  return jsonResponse({
+    isSuccess: true,
+    data: { moved, book: newBook },
+  });
 }
 
 // ==========================================
