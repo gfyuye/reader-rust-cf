@@ -49,7 +49,7 @@ export interface ReadConfig {
   fontColor: string
   pageWidth: number
   pageMode: 'auto' | 'mobile'
-  readMethod: '上下滑动' | '左右翻页' | '上下滚动'
+  readMethod: '上下滑动' | '左右翻页' | '连续翻页'
   animateDuration: number
   autoPageMode: 'pixel' | 'paragraph'
   scrollPixel: number
@@ -88,8 +88,8 @@ function loadConfig(): ReadConfig {
     const saved = localStorage.getItem('readConfig')
     if (saved) {
       const parsed = { ...defaultConfig, ...JSON.parse(saved) }
-      if ((parsed as any).readMethod === '上下滚动2') {
-        parsed.readMethod = '上下滚动'
+      if ((parsed as any).readMethod === '上下滚动' || (parsed as any).readMethod === '上下滚动2') {
+        parsed.readMethod = '连续翻页'
       }
       return parsed
     }

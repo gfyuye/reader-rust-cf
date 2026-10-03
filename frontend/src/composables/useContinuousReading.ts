@@ -13,7 +13,7 @@ export interface ContinuousChapterItem {
 
 export function useContinuousReading(
   store: ReaderStore,
-  renderChapterHtml: (rawText: string) => string,
+  renderChapterHtml: (rawText: string, chapterTitle?: string) => string,
   isContinuousMode: ComputedRef<boolean>,
   scrollContainerRef: Ref<HTMLElement | undefined>,
 ) {
@@ -32,14 +32,14 @@ export function useContinuousReading(
       index,
       title: chapter.title,
       content: chapterContent,
-      html: renderChapterHtml(chapterContent),
+      html: renderChapterHtml(chapterContent, chapter.title),
     } satisfies ContinuousChapterItem
   }
 
   function syncContinuousChapterHtml() {
     continuousChapters.value = continuousChapters.value.map((chapter) => ({
       ...chapter,
-      html: renderChapterHtml(chapter.content),
+      html: renderChapterHtml(chapter.content, chapter.title),
     }))
   }
 
@@ -60,14 +60,20 @@ export function useContinuousReading(
     }, 0)
   }
 
-  async function initializeContinuousChapters(targetIndex = store.currentIndex, smooth = false, shouldScroll = true) {
+  async function initializeContinuousChapters(
+    targetIndex = store.currentIndex,
+    smooth = false,
+    shouldScroll = true,
+    explicitProgress?: number,
+  ) {
     if (!isContinuousMode.value || !store.chapters[targetIndex]) return
 
     const current = await buildContinuousChapter(targetIndex)
     if (!current) return
 
     continuousChapters.value = [current]
-    setContinuousActiveChapter(targetIndex, current.content, store.chapterScrollProgress || 0)
+    const progress = explicitProgress !== undefined ? explicitProgress : (store.chapterScrollProgress || 0)
+    setContinuousActiveChapter(targetIndex, current.content, progress)
 
     if (shouldScroll) {
       await nextTick()
@@ -92,7 +98,7 @@ export function useContinuousReading(
     if (current) {
       if (current.content !== store.content) {
         current.content = store.content
-        current.html = renderChapterHtml(store.content)
+        current.html = renderChapterHtml(store.content, current.title)
       }
       return
     }

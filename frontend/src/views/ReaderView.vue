@@ -364,7 +364,7 @@ const readerProgressExitSaver = createReaderProgressExitSaver({
   flushToServerKeepalive: () => store.flushProgressToServerKeepalive(true),
 })
 const isContinuousMode = computed(() =>
-  config.value.readMethod === '上下滚动',
+  config.value.readMethod === '连续翻页' || (config.value.readMethod as any) === '上下滚动',
 )
 const isHorizontalPageMode = computed(() => config.value.readMethod === '左右翻页')
 const isIosWebkit = computed(() => {
@@ -481,7 +481,7 @@ const currentFontFamily = computed(() => {
   return preset ? preset.family : ''
 })
 
-function formatChapterHtml(rawText: string) {
+function formatChapterHtml(rawText: string, chapterTitle?: string) {
   if (!rawText) return ''
   const text = rawText
   const stripLeadingIndent = (line: string) => line.replace(/^[\u3000\u00A0 \t]+/, '')
@@ -514,6 +514,23 @@ function formatChapterHtml(rawText: string) {
         return `<p${shouldIndent ? ' class="reader-indent"' : ''} style="margin-top: 0; margin-bottom: ${config.value.paragraphSpacing}em;">${content}</p>`
       })
       .join('')
+  }
+
+  // Deduplicate title: if content's first element text matches the chapter title, remove it
+  if (chapterTitle) {
+    const normTitle = chapterTitle.replace(/[\s\u3000\u00A0]/g, '').toLowerCase()
+    const firstChild = wrapper.firstElementChild as HTMLElement | null
+    if (firstChild) {
+      const childText = (firstChild.textContent || '').replace(/[\s\u3000\u00A0]/g, '').toLowerCase()
+      if (
+        childText &&
+        (childText === normTitle ||
+          (normTitle.length >= 2 && childText.startsWith(normTitle)) ||
+          (childText.length >= 2 && normTitle.startsWith(childText)))
+      ) {
+        firstChild.remove()
+      }
+    }
   }
 
   appendLocalEpubAssetAuth(wrapper)
@@ -582,11 +599,11 @@ function escapeHtmlText(value: string) {
     .replace(/>/g, '&gt;')
 }
 
-function renderChapterHtml(rawText: string) {
-  return formatChapterHtml(store.processContentForDisplay(rawText || ''))
+function renderChapterHtml(rawText: string, chapterTitle?: string) {
+  return formatChapterHtml(store.processContentForDisplay(rawText || ''), chapterTitle)
 }
 
-const formattedContent = computed(() => formatChapterHtml(store.displayContent || ''))
+const formattedContent = computed(() => formatChapterHtml(store.displayContent || '', store.currentChapter?.title))
 
 const {
   horizontalPageIndex,
@@ -757,6 +774,9 @@ async function nextChapter() {
 async function jumpFromCatalog(targetIndex: number) {
   if (targetIndex < 0 || targetIndex >= store.chapters.length) return
 
+  pendingRestorePosition.value = null
+  store.setChapterScrollProgress(0)
+
   if (!isContinuousMode.value) {
     await store.loadChapter(targetIndex)
     store.closePanel()
@@ -764,14 +784,23 @@ async function jumpFromCatalog(targetIndex: number) {
     return
   }
 
-  await rebuildContinuousAtChapter(targetIndex)
+  suppressPositionSaveUntil = Date.now() + 1500
+  await rebuildContinuousAtChapter(targetIndex, 0)
   store.closePanel()
+  scrollToTop()
 }
 
-async function rebuildContinuousAtChapter(targetIndex: number) {
-  suppressContinuousScrollSyncUntil = Date.now() + 500
-  suppressContinuousAutoLoadUntil = Date.now() + 500
-  await initializeContinuousChapters(targetIndex, false)
+async function rebuildContinuousAtChapter(targetIndex: number, explicitProgress?: number) {
+  suppressContinuousScrollSyncUntil = Date.now() + 1000
+  suppressContinuousAutoLoadUntil = Date.now() + 1000
+  if (explicitProgress !== undefined) {
+    store.setChapterScrollProgress(explicitProgress)
+    pendingRestorePosition.value = null
+  }
+  await initializeContinuousChapters(targetIndex, false, true, explicitProgress)
+  if (explicitProgress === 0 && scrollContainerRef.value) {
+    scrollContainerRef.value.scrollTop = 0
+  }
 }
 
 function scrollToTop() {

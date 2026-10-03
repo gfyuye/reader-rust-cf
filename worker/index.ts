@@ -764,6 +764,17 @@ async function handleGetBookContent(request: Request, env: Env): Promise<Respons
     return jsonResponse({ isSuccess: true, data: text });
   }
 
+  // 3. PDF Book
+  if (bookUrl.startsWith("local-pdf:") || chapterUrl.startsWith("local-pdf:")) {
+    const bookId = (bookUrl || chapterUrl).split(":")[1].split("#")[0];
+    const page = index >= 0 ? index + 1 : 1;
+    const streamUrl = `/reader3/pdf/stream?bookId=${encodeURIComponent(bookId)}#page=${page}`;
+    const html = `<div class="pdf-reader-frame-container" style="width: 100%; height: 85vh; min-height: 600px; display: flex; flex-direction: column;">
+      <iframe src="${streamUrl}" style="width: 100%; height: 100%; flex: 1; border: none; border-radius: 8px; background: #fff;" allowfullscreen></iframe>
+    </div>`;
+    return jsonResponse({ isSuccess: true, data: html });
+  }
+
   // 3. Web Novel (Direct fetch or Kitesurf)
   if (chapterUrl.startsWith("http://") || chapterUrl.startsWith("https://")) {
     if (!isSafeRemoteUrl(chapterUrl)) {
@@ -1039,9 +1050,14 @@ async function handleEpubUpload(request: Request, env: Env): Promise<Response> {
     };
 
     let shelf: any[] = (await getDocument(env, userNs, "bookshelf.json")) || [];
-    const idx = shelf.findIndex((b) => b.bookUrl === bookUrl);
-    if (idx >= 0) shelf[idx] = newBook;
-    else shelf.unshift(newBook);
+    const idx = shelf.findIndex(
+      (b) => b.bookUrl === bookUrl || (b.name === newBook.name && b.origin === newBook.origin)
+    );
+    if (idx >= 0) {
+      shelf[idx] = { ...shelf[idx], ...newBook, bookUrl: shelf[idx].bookUrl, durChapterTime: Date.now() };
+    } else {
+      shelf.unshift(newBook);
+    }
     await saveDocument(env, userNs, "bookshelf.json", shelf);
 
     return jsonResponse({
@@ -1315,9 +1331,14 @@ async function handlePdfUpload(request: Request, env: Env): Promise<Response> {
     };
 
     let shelf: any[] = (await getDocument(env, userNs, "bookshelf.json")) || [];
-    const idx = shelf.findIndex((b) => b.bookUrl === bookUrl);
-    if (idx >= 0) shelf[idx] = newBook;
-    else shelf.unshift(newBook);
+    const idx = shelf.findIndex(
+      (b) => b.bookUrl === bookUrl || (b.name === newBook.name && b.origin === newBook.origin)
+    );
+    if (idx >= 0) {
+      shelf[idx] = { ...shelf[idx], ...newBook, bookUrl: shelf[idx].bookUrl, durChapterTime: Date.now() };
+    } else {
+      shelf.unshift(newBook);
+    }
     await saveDocument(env, userNs, "bookshelf.json", shelf);
 
     return jsonResponse({
@@ -1458,35 +1479,34 @@ async function handleMobiUpload(request: Request, env: Env): Promise<Response> {
        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '未知作者', ?8, 'ready', ?9, ?10)`
     ).bind(bookId, userNs, fileName, r2Key, fileSize, totalChapters, title, mobiHeader.compression, now, now).run();
 
-    const stmts = [];
+    const mobiChapters: Array<{ index: number; title: string; byteOffset: number; byteLength: number; compression: number }> = [];
     for (let i = 1; i <= totalChapters; i++) {
       if (i >= pdb.recordOffsets.length) break;
       const byteOffset = pdb.recordOffsets[i];
       const byteLength = i + 1 < pdb.recordOffsets.length ? pdb.recordOffsets[i + 1] - byteOffset : fileSize - byteOffset;
-      const recBytes = bodyBytes.subarray(byteOffset, byteOffset + byteLength);
-      const decompressed = mobiHeader.compression === 2 ? decompressPalmDoc(recBytes) : recBytes;
-      let recText = "";
+      const recSample = bodyBytes.subarray(byteOffset, byteOffset + Math.min(256, byteLength));
+      let chTitle = `第 ${i} 节`;
       try {
-        recText = new TextDecoder("utf-8", { fatal: true }).decode(decompressed);
-      } catch {
+        const decompSample = mobiHeader.compression === 2 ? decompressPalmDoc(recSample, 512) : recSample;
+        let recText = "";
         try {
-          recText = new TextDecoder("gb18030").decode(decompressed);
+          recText = new TextDecoder("utf-8").decode(decompSample);
         } catch {
-          recText = new TextDecoder().decode(decompressed);
+          recText = new TextDecoder("gb18030").decode(decompSample);
         }
-      }
-      const chTitle = extractMobiChapterTitle(recText, i);
-      stmts.push(
-        env.DB.prepare(
-          `INSERT INTO mobi_chapters (book_id, chapter_index, title, byte_offset, byte_length, compression, created_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`
-        ).bind(bookId, i - 1, chTitle, byteOffset, byteLength, mobiHeader.compression, now)
-      );
+        chTitle = extractMobiChapterTitle(recText, i);
+      } catch {}
+
+      mobiChapters.push({
+        index: i - 1,
+        title: chTitle,
+        byteOffset,
+        byteLength,
+        compression: mobiHeader.compression,
+      });
     }
 
-    for (let i = 0; i < stmts.length; i += 50) {
-      await env.DB.batch(stmts.slice(i, i + 50));
-    }
+    await batchInsertMobiChapters(env, bookId, mobiChapters, now);
 
     const bookUrl = `local-mobi:${bookId}`;
     const newBook = {
@@ -1506,9 +1526,14 @@ async function handleMobiUpload(request: Request, env: Env): Promise<Response> {
     };
 
     let shelf: any[] = (await getDocument(env, userNs, "bookshelf.json")) || [];
-    const idx = shelf.findIndex((b) => b.bookUrl === bookUrl);
-    if (idx >= 0) shelf[idx] = newBook;
-    else shelf.unshift(newBook);
+    const idx = shelf.findIndex(
+      (b) => b.bookUrl === bookUrl || (b.name === newBook.name && b.origin === newBook.origin)
+    );
+    if (idx >= 0) {
+      shelf[idx] = { ...shelf[idx], ...newBook, bookUrl: shelf[idx].bookUrl, durChapterTime: Date.now() };
+    } else {
+      shelf.unshift(newBook);
+    }
     await saveDocument(env, userNs, "bookshelf.json", shelf);
 
     return jsonResponse({
@@ -2431,35 +2456,70 @@ function parseMobiHeader(rec0: Uint8Array): { compression: number; textRecordCou
   return { compression, textRecordCount, title };
 }
 
-function decompressPalmDoc(data: Uint8Array): Uint8Array {
-  const out: number[] = [];
+function decompressPalmDoc(data: Uint8Array, maxOut = 16384): Uint8Array {
+  const out = new Uint8Array(maxOut);
+  let outLen = 0;
   let i = 0;
-  while (i < data.length) {
+  while (i < data.length && outLen < maxOut) {
     const b = data[i++];
     if (b === 0x00) {
-      out.push(0);
+      out[outLen++] = 0;
     } else if (b <= 0x08) {
-      const end = Math.min(i + b, data.length);
-      for (let k = i; k < end; k++) out.push(data[k]);
-      i = end;
+      const count = Math.min(b, data.length - i, maxOut - outLen);
+      out.set(data.subarray(i, i + count), outLen);
+      outLen += count;
+      i += b;
     } else if (b <= 0x7f) {
-      out.push(b);
+      out[outLen++] = b;
     } else if (b <= 0xbf) {
       if (i < data.length) {
         const next = data[i++];
         const distance = ((b & 0x3f) << 3) | (next >> 5);
         const length = (next & 0x07) + 3;
-        if (distance > 0 && distance <= out.length) {
-          const start = out.length - distance;
-          for (let k = 0; k < length; k++) out.push(out[start + (k % distance)]);
+        if (distance > 0 && distance <= outLen) {
+          const copyLen = Math.min(length, maxOut - outLen);
+          for (let k = 0; k < copyLen; k++) {
+            out[outLen] = out[outLen - distance];
+            outLen++;
+          }
         }
       }
     } else {
-      out.push(0x20);
-      out.push(b ^ 0x80);
+      if (outLen + 2 <= maxOut) {
+        out[outLen++] = 0x20;
+        out[outLen++] = b ^ 0x80;
+      } else {
+        break;
+      }
     }
   }
-  return new Uint8Array(out);
+  return out.subarray(0, outLen);
+}
+
+async function batchInsertMobiChapters(
+  env: Env,
+  bookId: string,
+  chapters: Array<{ index: number; title: string; byteOffset: number; byteLength: number; compression: number }>,
+  now: number
+) {
+  const CHUNK_SIZE = 30;
+  const statements: D1PreparedStatement[] = [];
+
+  for (let i = 0; i < chapters.length; i += CHUNK_SIZE) {
+    const chunk = chapters.slice(i, i + CHUNK_SIZE);
+    const placeholders = chunk.map(() => "(?1, ?, ?, ?, ?, ?, ?2)").join(", ");
+    const sql = `INSERT INTO mobi_chapters (book_id, chapter_index, title, byte_offset, byte_length, compression, created_at) VALUES ${placeholders}`;
+    const params: any[] = [bookId, now];
+    for (const ch of chunk) {
+      params.push(ch.index, ch.title, ch.byteOffset, ch.byteLength, ch.compression);
+    }
+    statements.push(env.DB.prepare(sql).bind(...params));
+  }
+
+  const BATCH_SIZE = 25;
+  for (let j = 0; j < statements.length; j += BATCH_SIZE) {
+    await env.DB.batch(statements.slice(j, j + BATCH_SIZE));
+  }
 }
 
 // ==========================================
@@ -3402,9 +3462,14 @@ async function handleTxtUpload(request: Request, env: Env, ctx: ExecutionContext
     };
 
     let shelf: any[] = (await getDocument(env, userNs, "bookshelf.json")) || [];
-    const idx = shelf.findIndex((b) => b.bookUrl === bookUrl);
-    if (idx >= 0) shelf[idx] = newBook;
-    else shelf.unshift(newBook);
+    const idx = shelf.findIndex(
+      (b) => b.bookUrl === bookUrl || (b.name === newBook.name && b.origin === newBook.origin)
+    );
+    if (idx >= 0) {
+      shelf[idx] = { ...shelf[idx], ...newBook, bookUrl: shelf[idx].bookUrl, durChapterTime: Date.now() };
+    } else {
+      shelf.unshift(newBook);
+    }
     await saveDocument(env, userNs, "bookshelf.json", shelf);
 
     triggerOnChangeSync(env, userNs, ctx);
@@ -3499,58 +3564,12 @@ async function handleImportWebdavBook(request: Request, env: Env, ctx: Execution
   const targetObj = await env.BUCKET.get(targetKey);
   if (!targetObj) return jsonResponse({ isSuccess: false, errorMsg: "无法读取目标书籍文件" });
 
-  const bodyBytes = new Uint8Array(await targetObj.arrayBuffer());
-  const fileSize = bodyBytes.length;
+  const fileSize = targetObj.size;
   const lower = name.toLowerCase();
 
   let newBook: any = null;
 
-  if (lower.endsWith(".txt")) {
-    const text = decodeTxtBytes(bodyBytes);
-    const utf8Bytes = new TextEncoder().encode(text);
-    await env.BUCKET.put(targetKey, utf8Bytes, { httpMetadata: { contentType: "text/plain; charset=utf-8" } });
-
-    const bookId = `txt_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-    const chapters = scanTxtChapterOffsets(text, utf8Bytes);
-    const title = name.replace(/\.txt$/i, "");
-    const now = Math.floor(Date.now() / 1000);
-
-    await env.DB.prepare(
-      `INSERT INTO txt_books (book_id, user_ns, file_name, r2_key, file_size, total_chapters, title, author, status, created_at, updated_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '本地导入', 'ready', ?8, ?9)
-       ON CONFLICT(book_id) DO UPDATE SET file_size=excluded.file_size, total_chapters=excluded.total_chapters, title=excluded.title, updated_at=excluded.updated_at`
-    ).bind(bookId, userNs, name, targetKey, utf8Bytes.length, chapters.length, title, now, now).run();
-
-    const stmts = chapters.map((ch, idx) =>
-      env.DB.prepare(
-        `INSERT INTO txt_chapters (book_id, chapter_index, title, byte_offset, byte_length, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(book_id, chapter_index) DO UPDATE SET byte_offset=excluded.byte_offset, byte_length=excluded.byte_length`
-      ).bind(bookId, idx, ch.title, ch.offset, ch.length, now)
-    );
-    for (let i = 0; i < stmts.length; i += 50) {
-      await env.DB.batch(stmts.slice(i, i + 50));
-    }
-
-    const bookUrl = `local-txt:${bookId}`;
-    newBook = {
-      name: title,
-      author: "本地导入",
-      bookUrl,
-      origin: "local-txt",
-      originName: "本地 TXT",
-      tocUrl: bookUrl,
-      canUpdate: false,
-      durChapterIndex: 0,
-      durChapterPos: 0,
-      durChapterTitle: chapters[0]?.title || "第一章",
-      durChapterTime: Date.now(),
-      totalChapterNum: chapters.length,
-      latestChapterTitle: chapters[chapters.length - 1]?.title,
-      kind: "本地TXT",
-      wordCount: `${text.length}字`,
-    };
-  } else if (lower.endsWith(".epub")) {
+  if (lower.endsWith(".epub")) {
     const bookId = `epub_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
     const { title, author, totalChapters } = await indexEpubIntoDatabase(
       env,
@@ -3577,10 +3596,14 @@ async function handleImportWebdavBook(request: Request, env: Env, ctx: Execution
       totalChapterNum: totalChapters,
       kind: "本地EPUB",
     };
+  } else if (lower.endsWith(".txt")) {
+    newBook = await indexTxtBookFromR2(env, userNs, name, targetKey, fileSize);
   } else if (lower.endsWith(".pdf")) {
     const bookId = `pdf_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
     const tailSize = Math.min(65536, fileSize);
-    const tailText = new TextDecoder().decode(bodyBytes.subarray(fileSize - tailSize));
+    const tailObj = await env.BUCKET.get(targetKey, { range: { offset: Math.max(0, fileSize - tailSize), length: tailSize } });
+    const tailBytes = tailObj ? new Uint8Array(await tailObj.arrayBuffer()) : new Uint8Array(0);
+    const tailText = new TextDecoder().decode(tailBytes);
     const countMatch = tailText.match(/\/Count\s+(\d+)/);
     const totalPages = countMatch ? parseInt(countMatch[1], 10) : 1;
     const titleMatch = tailText.match(/\/Title\s*\(([^)]+)\)/);
@@ -3603,7 +3626,7 @@ async function handleImportWebdavBook(request: Request, env: Env, ctx: Execution
       originName: "本地 PDF",
       tocUrl: bookUrl,
       canUpdate: false,
-      durChapterIndex: 1,
+      durChapterIndex: 0,
       durChapterPos: 0,
       durChapterTitle: "第 1 页",
       durChapterTime: Date.now(),
@@ -3611,74 +3634,24 @@ async function handleImportWebdavBook(request: Request, env: Env, ctx: Execution
       kind: "本地PDF",
     };
   } else if (lower.endsWith(".mobi") || lower.endsWith(".prc")) {
-    const bookId = `mobi_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-    const pdb = parsePdbRecords(bodyBytes.subarray(0, 16384), fileSize);
-    if (!pdb || pdb.recordOffsets.length === 0) return jsonResponse({ isSuccess: false, errorMsg: "非法 MOBI 文件" });
-    const rec0Offset = pdb.recordOffsets[0];
-    const rec0Len = pdb.recordOffsets.length > 1 ? pdb.recordOffsets[1] - rec0Offset : fileSize - rec0Offset;
-    const rec0Bytes = bodyBytes.subarray(rec0Offset, rec0Offset + rec0Len);
-    const mobiHeader = parseMobiHeader(rec0Bytes);
-    const title = mobiHeader.title || name.replace(/\.(mobi|prc)$/i, "");
-    const totalChapters = Math.min(mobiHeader.textRecordCount, pdb.recordOffsets.length - 1);
-    const now = Math.floor(Date.now() / 1000);
-
-    await env.DB.prepare(
-      `INSERT INTO mobi_books (book_id, user_ns, file_name, r2_key, file_size, total_chapters, title, author, compression, status, created_at, updated_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '未知作者', ?8, 'ready', ?9, ?10)`
-    ).bind(bookId, userNs, name, targetKey, fileSize, totalChapters, title, mobiHeader.compression, now, now).run();
-
-    const stmts = [];
-    for (let i = 1; i <= totalChapters; i++) {
-      if (i >= pdb.recordOffsets.length) break;
-      const byteOffset = pdb.recordOffsets[i];
-      const byteLength = i + 1 < pdb.recordOffsets.length ? pdb.recordOffsets[i + 1] - byteOffset : fileSize - byteOffset;
-      const recBytes = bodyBytes.subarray(byteOffset, byteOffset + byteLength);
-      const decompressed = mobiHeader.compression === 2 ? decompressPalmDoc(recBytes) : recBytes;
-      let recText = "";
-      try {
-        recText = new TextDecoder("utf-8", { fatal: true }).decode(decompressed);
-      } catch {
-        try {
-          recText = new TextDecoder("gb18030").decode(decompressed);
-        } catch {
-          recText = new TextDecoder().decode(decompressed);
-        }
-      }
-      const chTitle = extractMobiChapterTitle(recText, i);
-      stmts.push(
-        env.DB.prepare(
-          `INSERT INTO mobi_chapters (book_id, chapter_index, title, byte_offset, byte_length, compression, created_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`
-        ).bind(bookId, i - 1, chTitle, byteOffset, byteLength, mobiHeader.compression, now)
-      );
-    }
-    for (let i = 0; i < stmts.length; i += 50) {
-      await env.DB.batch(stmts.slice(i, i + 50));
-    }
-
-    const bookUrl = `local-mobi:${bookId}`;
-    newBook = {
-      name: title,
-      author: "未知作者",
-      bookUrl,
-      origin: "local-mobi",
-      originName: "本地 MOBI",
-      tocUrl: bookUrl,
-      canUpdate: false,
-      durChapterIndex: 0,
-      durChapterPos: 0,
-      durChapterTitle: "第 1 节",
-      durChapterTime: Date.now(),
-      totalChapterNum: totalChapters,
-      kind: "本地MOBI",
-    };
+    newBook = await indexMobiBookFromR2(env, userNs, name, targetKey, fileSize);
   }
 
   if (newBook) {
     let shelf: any[] = (await getDocument(env, userNs, "bookshelf.json")) || [];
-    const idx = shelf.findIndex((b) => b.bookUrl === newBook.bookUrl);
-    if (idx >= 0) shelf[idx] = newBook;
-    else shelf.unshift(newBook);
+    const existingIdx = shelf.findIndex(
+      (b) => b.bookUrl === newBook.bookUrl || (b.name === newBook.name && b.origin === newBook.origin)
+    );
+    if (existingIdx >= 0) {
+      shelf[existingIdx] = {
+        ...shelf[existingIdx],
+        ...newBook,
+        bookUrl: shelf[existingIdx].bookUrl,
+        durChapterTime: Date.now(),
+      };
+    } else {
+      shelf.unshift(newBook);
+    }
     await saveDocument(env, userNs, "bookshelf.json", shelf);
     triggerOnChangeSync(env, userNs, ctx);
   }
@@ -3769,21 +3742,20 @@ async function indexMobiBookFromR2(env: Env, userNs: string, fileName: string, r
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '未知作者', ?8, 'ready', ?9, ?10)`
   ).bind(bookId, userNs, fileName, r2Key, fileSize, totalChapters, title, mobiHeader.compression, now, now).run();
 
-  const stmts = [];
+  const mobiChapters: Array<{ index: number; title: string; byteOffset: number; byteLength: number; compression: number }> = [];
   for (let i = 1; i <= totalChapters; i++) {
     if (i >= pdb.recordOffsets.length) break;
     const byteOffset = pdb.recordOffsets[i];
     const byteLength = i + 1 < pdb.recordOffsets.length ? pdb.recordOffsets[i + 1] - byteOffset : fileSize - byteOffset;
-    stmts.push(
-      env.DB.prepare(
-        `INSERT INTO mobi_chapters (book_id, chapter_index, title, byte_offset, byte_length, compression, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`
-      ).bind(bookId, i - 1, `第 ${i} 节`, byteOffset, byteLength, mobiHeader.compression, now)
-    );
+    mobiChapters.push({
+      index: i - 1,
+      title: `第 ${i} 节`,
+      byteOffset,
+      byteLength,
+      compression: mobiHeader.compression,
+    });
   }
-  for (let i = 0; i < stmts.length; i += 50) {
-    await env.DB.batch(stmts.slice(i, i + 50));
-  }
+  await batchInsertMobiChapters(env, bookId, mobiChapters, now);
 
   const bookUrl = `local-mobi:${bookId}`;
   return {
@@ -3971,9 +3943,19 @@ async function handleChunkedUploadComplete(request: Request, env: Env, ctx: Exec
 
     if (newBook) {
       let shelf: any[] = (await getDocument(env, userNs, "bookshelf.json")) || [];
-      const idx = shelf.findIndex((b) => b.bookUrl === newBook.bookUrl);
-      if (idx >= 0) shelf[idx] = newBook;
-      else shelf.unshift(newBook);
+      const idx = shelf.findIndex(
+        (b) => b.bookUrl === newBook.bookUrl || (b.name === newBook.name && b.origin === newBook.origin)
+      );
+      if (idx >= 0) {
+        shelf[idx] = {
+          ...shelf[idx],
+          ...newBook,
+          bookUrl: shelf[idx].bookUrl,
+          durChapterTime: Date.now(),
+        };
+      } else {
+        shelf.unshift(newBook);
+      }
       await saveDocument(env, userNs, "bookshelf.json", shelf);
       triggerOnChangeSync(env, userNs, ctx);
     }
@@ -4561,13 +4543,13 @@ async function handleGetChapterList(request: Request, env: Env): Promise<Respons
 
   // 4. Local PDF Pages
   if (targetUrl.startsWith("local-pdf:") || targetUrl.includes(".pdf")) {
-    const bookId = targetUrl.split(":")[1] || targetUrl;
+    const bookId = targetUrl.split(":")[1]?.split("#")[0] || targetUrl;
     const book = await env.DB.prepare(`SELECT total_pages FROM pdf_books WHERE book_id = ?1`).bind(bookId).first<{ total_pages: number }>();
-    const count = book?.total_pages || 1;
+    const count = Math.max(1, book?.total_pages || 1);
     const chapters = Array.from({ length: count }, (_, i) => ({
-      index: i + 1,
+      index: i,
       title: `第 ${i + 1} 页`,
-      url: `${targetUrl}#${i + 1}`,
+      url: `${targetUrl.split("#")[0]}#${i}`,
     }));
     return jsonResponse({ isSuccess: true, data: chapters });
   }
