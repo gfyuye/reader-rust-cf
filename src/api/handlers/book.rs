@@ -1046,7 +1046,7 @@ pub async fn upload_txt_book(
         }
         file_name = field.file_name().unwrap_or("book.txt").to_string();
         bytes = Some(
-            read_limited_multipart_field(field, MAX_TXT_UPLOAD_BYTES, "TXT 文件不能超过 50MB")
+            read_limited_multipart_field(field, MAX_TXT_UPLOAD_BYTES, "TXT 文件不能超过 2GB")
                 .await?,
         );
         break;
@@ -1101,7 +1101,7 @@ pub async fn upload_epub_book(
         }
         file_name = field.file_name().unwrap_or("book.epub").to_string();
         bytes = Some(
-            read_limited_multipart_field(field, MAX_EPUB_UPLOAD_BYTES, "EPUB 文件不能超过 80MB")
+            read_limited_multipart_field(field, MAX_EPUB_UPLOAD_BYTES, "EPUB 文件不能超过 2GB")
                 .await?,
         );
         break;

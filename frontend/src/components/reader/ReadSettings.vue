@@ -132,7 +132,6 @@
           <button class="opt-btn" :class="{ active: config.readMethod === '上下滑动' }" @click="store.updateConfig('readMethod', '上下滑动')">上下滑动</button>
           <button class="opt-btn" :class="{ active: config.readMethod === '左右翻页' }" @click="store.updateConfig('readMethod', '左右翻页')">左右翻页</button>
           <button class="opt-btn" :class="{ active: config.readMethod === '上下滚动' }" @click="store.updateConfig('readMethod', '上下滚动')">上下滚动</button>
-          <button class="opt-btn" :class="{ active: config.readMethod === '上下滚动2' }" @click="store.updateConfig('readMethod', '上下滚动2')">上下滚动2</button>
         </div>
       </div>
 

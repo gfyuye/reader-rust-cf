@@ -305,7 +305,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .merge(api)
         .merge(static_web)
-        .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(2048 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid::default()))

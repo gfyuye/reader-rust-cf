@@ -18,6 +18,7 @@ import {
 import { getReplaceRules } from '../api/replaceRule'
 import type { Book, BookChapter, Bookmark, ReplaceRule } from '../types'
 import { getBrowserCachedChapter, setBrowserCachedChapter } from '../utils/browserCache'
+import { getSavedReadingPosition } from '../utils/readingPosition'
 import { isLocalBook } from '../utils/localBook'
 import { saveRecentReadBook } from '../utils/recentBooks'
 import {
@@ -48,7 +49,7 @@ export interface ReadConfig {
   fontColor: string
   pageWidth: number
   pageMode: 'auto' | 'mobile'
-  readMethod: '上下滑动' | '左右翻页' | '上下滚动' | '上下滚动2'
+  readMethod: '上下滑动' | '左右翻页' | '上下滚动'
   animateDuration: number
   autoPageMode: 'pixel' | 'paragraph'
   scrollPixel: number
@@ -85,7 +86,13 @@ const defaultConfig: ReadConfig = {
 function loadConfig(): ReadConfig {
   try {
     const saved = localStorage.getItem('readConfig')
-    if (saved) return { ...defaultConfig, ...JSON.parse(saved) }
+    if (saved) {
+      const parsed = { ...defaultConfig, ...JSON.parse(saved) }
+      if ((parsed as any).readMethod === '上下滚动2') {
+        parsed.readMethod = '上下滚动'
+      }
+      return parsed
+    }
   } catch { /* ignore */ }
   return { ...defaultConfig }
 }
@@ -235,17 +242,21 @@ export const useReaderStore = defineStore('reader', () => {
     saveConfig()
   }
 
-  const chineseConverter = ref<((text: string) => string) | null>(null)
+  const traditionalConverter = ref<((text: string) => string) | null>(null)
+  const simplizedConverter = ref<((text: string) => string) | null>(null)
   let chineseLoading: Promise<void> | null = null
 
   async function ensureChineseConverterLoaded() {
-    if (chineseConverter.value || chineseLoading) return chineseLoading || Promise.resolve()
+    if (traditionalConverter.value && simplizedConverter.value) return Promise.resolve()
+    if (chineseLoading) return chineseLoading
     chineseLoading = import('../utils/chinese.js')
       .then((module) => {
-        chineseConverter.value = module.traditionalized
+        traditionalConverter.value = module.traditionalized
+        simplizedConverter.value = module.simplized
       })
       .catch(() => {
-        chineseConverter.value = null
+        traditionalConverter.value = null
+        simplizedConverter.value = null
       })
       .finally(() => {
         chineseLoading = null
@@ -327,8 +338,14 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   function convertContent(text: string) {
-    if (!text || !chineseConverter.value) return text
-    return chineseConverter.value(text)
+    if (!text) return text
+    if (config.chineseMode === 'traditional') {
+      return traditionalConverter.value ? traditionalConverter.value(text) : text
+    }
+    if (config.chineseMode === 'simplified') {
+      return simplizedConverter.value ? simplizedConverter.value(text) : text
+    }
+    return text
   }
 
   function processContentForDisplay(text: string) {
@@ -342,9 +359,7 @@ export const useReaderStore = defineStore('reader', () => {
   watch(
     () => config.chineseMode,
     (mode) => {
-      if (mode === 'traditional') {
-        void ensureChineseConverterLoaded()
-      }
+      void ensureChineseConverterLoaded()
     },
     { immediate: true },
   )
@@ -376,10 +391,15 @@ export const useReaderStore = defineStore('reader', () => {
 
   function currentServerProgressPayload(index = currentIndex.value, progress = chapterScrollProgress.value) {
     if (!book.value) return null
+    const encodedPos = encodeServerProgress(progress)
     return {
       bookUrl: book.value.bookUrl,
       index,
-      position: encodeServerProgress(progress),
+      position: encodedPos,
+      durChapterIndex: index,
+      durChapterPos: encodedPos,
+      durChapterTitle: chapters.value[index]?.title || book.value.durChapterTitle || '',
+      durChapterTime: Date.now(),
     }
   }
 
@@ -1182,7 +1202,11 @@ export const useReaderStore = defineStore('reader', () => {
     chapters.value = []
     content.value = ''
     appStore.markBookOpened(b.bookUrl)
-    currentIndex.value = b.durChapterIndex || 0
+    const savedPos = getSavedReadingPosition(b.bookUrl)
+    const effectiveIndex = (savedPos && typeof savedPos.chapterIndex === 'number')
+      ? savedPos.chapterIndex
+      : (b.durChapterIndex || 0)
+    currentIndex.value = effectiveIndex
     chapterScrollProgress.value = 0
     preloadedContent.value.clear()
     loadReadChapterHistory(b)
@@ -1329,8 +1353,13 @@ export const useReaderStore = defineStore('reader', () => {
       const chapterContent = await fetchChapterContent(index, forceRefresh)
       if (chapterContent == null) return
 
-      const previousSavedIndex = book.value.durChapterIndex ?? 0
-      const previousSavedProgress = decodeServerProgress(book.value.durChapterPos)
+      const savedPos = getSavedReadingPosition(book.value.bookUrl)
+      const previousSavedIndex = (savedPos && typeof savedPos.chapterIndex === 'number')
+        ? savedPos.chapterIndex
+        : (book.value.durChapterIndex ?? 0)
+      const previousSavedProgress = (savedPos && typeof savedPos.progress === 'number')
+        ? savedPos.progress
+        : decodeServerProgress(book.value.durChapterPos)
       const isOpeningSavedChapter = !forceRefresh && index === previousSavedIndex
       const initialProgress = isOpeningSavedChapter ? previousSavedProgress : 0
 

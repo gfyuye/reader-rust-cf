@@ -364,9 +364,8 @@ const readerProgressExitSaver = createReaderProgressExitSaver({
   flushToServerKeepalive: () => store.flushProgressToServerKeepalive(true),
 })
 const isContinuousMode = computed(() =>
-  config.value.readMethod === '上下滚动' || config.value.readMethod === '上下滚动2',
+  config.value.readMethod === '上下滚动',
 )
-const hideReadChaptersMode = computed(() => config.value.readMethod === '上下滚动2')
 const isHorizontalPageMode = computed(() => config.value.readMethod === '左右翻页')
 const isIosWebkit = computed(() => {
   const ua = typeof navigator !== 'undefined' ? navigator.userAgent : ''
@@ -634,14 +633,12 @@ const {
   syncContinuousToStoreState,
   loadContinuousNext,
   getContinuousSections,
-  pruneReadChapters,
   clearContinuousChapters,
   disposeContinuousReading,
 } = useContinuousReading(
   store,
   renderChapterHtml,
   isContinuousMode,
-  hideReadChaptersMode,
   scrollContainerRef,
 )
 
@@ -833,6 +830,16 @@ function loadSavedReadingPosition() {
     if (localSaved && localSaved.chapterIndex === store.currentIndex) {
       selected = localSaved
       source = 'local'
+    } else if (localSaved && typeof localSaved.chapterIndex === 'number' && localSaved.chapterIndex >= 0) {
+      const serverTime = normalizePositionTimestamp(store.book?.durChapterTime)
+      if (localSaved.updatedAt >= serverTime || (store.book?.durChapterIndex ?? 0) === 0) {
+        selected = localSaved
+        source = 'local'
+        if (store.currentIndex !== localSaved.chapterIndex) {
+          void store.loadChapter(localSaved.chapterIndex)
+          return
+        }
+      }
     }
 
     if (serverSaved && serverSaved.chapterIndex === store.currentIndex) {
@@ -904,7 +911,7 @@ function saveReadingPosition(options: { force?: boolean } = {}) {
   const anchorViewportY = container.getBoundingClientRect().top + container.clientHeight * anchorRatio
   if (isContinuousMode.value && continuousChapters.value.length) {
     const section = container.querySelector(`.continuous-chapter[data-chapter-index="${store.currentIndex}"]`) as HTMLElement | null
-    const paragraphs = Array.from(section?.querySelectorAll('.chapter-text p') || []) as HTMLElement[]
+    const paragraphs = Array.from(section?.querySelectorAll('.chapter-text p, .chapter-text div, .chapter-text section, .chapter-text h1, .chapter-text h2, .chapter-text h3, .chapter-text h4, .chapter-text h5, .chapter-text h6') || []) as HTMLElement[]
     if (paragraphs.length) {
       let activeParagraph = paragraphs[0]
       let paragraphIndex = 0
@@ -920,7 +927,7 @@ function saveReadingPosition(options: { force?: boolean } = {}) {
       basePosition.paragraphProgress = paragraphProgress
     }
   } else if (!isHorizontalPageMode.value) {
-    const paragraphs = Array.from(chapterTextRef.value?.querySelectorAll('p') || []) as HTMLElement[]
+    const paragraphs = Array.from(chapterTextRef.value?.querySelectorAll('p, div, section, h1, h2, h3, h4, h5, h6') || []) as HTMLElement[]
     if (paragraphs.length) {
       let activeParagraph = paragraphs[0]
       let paragraphIndex = 0
@@ -1025,7 +1032,7 @@ function restoreReadingPositionInternal(saved: SavedReadingPosition | null, fina
       })
       return false
     }
-    const paragraphs = Array.from(section.querySelectorAll('.chapter-text p')) as HTMLElement[]
+    const paragraphs = Array.from(section.querySelectorAll('.chapter-text p, .chapter-text div, .chapter-text section, .chapter-text h1, .chapter-text h2, .chapter-text h3, .chapter-text h4, .chapter-text h5, .chapter-text h6')) as HTMLElement[]
     if (typeof saved.paragraphIndex === 'number' && !paragraphs.length) {
       debugPositionLog('restore waiting: continuous paragraphs not ready', {
         saved,
@@ -1055,7 +1062,7 @@ function restoreReadingPositionInternal(saved: SavedReadingPosition | null, fina
       )
     }
   } else {
-    const paragraphs = Array.from(chapterTextRef.value?.querySelectorAll('p') || []) as HTMLElement[]
+    const paragraphs = Array.from(chapterTextRef.value?.querySelectorAll('p, div, section, h1, h2, h3, h4, h5, h6') || []) as HTMLElement[]
     if (store.loading || !chapterTextRef.value) {
       debugPositionLog('restore waiting: chapter content not ready', {
         saved,
@@ -1765,9 +1772,6 @@ watch(() => store.currentIndex, async () => {
   resetAutoParagraphIndex()
   if (!store.isSpeaking) {
     clearReadingClass()
-  }
-  if (hideReadChaptersMode.value) {
-    pruneReadChapters(store.currentIndex)
   }
   if (!isContinuousMode.value && config.value.enablePreload) {
     store.preloadAroundChapter(store.currentIndex)

@@ -190,6 +190,7 @@ import GroupManagerModal from '../components/bookshelf/GroupManagerModal.vue'
 import SearchResults from '../components/SearchResults.vue'
 import CacheLibraryModal from '../components/CacheLibraryModal.vue'
 import type { Book, SearchBook } from '../types'
+import { getSavedReadingPosition } from '../utils/readingPosition'
 
 const router = useRouter()
 const shelfStore = useBookshelfStore()
@@ -278,7 +279,10 @@ async function handleBookClick(book: Book | SearchBook) {
   if (openingBookUrl.value === b.bookUrl) return
 
   openingBookUrl.value = b.bookUrl
-  const targetIndex = b.durChapterIndex || 0
+  const savedPos = getSavedReadingPosition(b.bookUrl)
+  const targetIndex = (savedPos && typeof savedPos.chapterIndex === 'number' && savedPos.chapterIndex >= 0)
+    ? savedPos.chapterIndex
+    : (b.durChapterIndex || 0)
 
   try {
     await shelfStore.moveBookToFront(b.bookUrl).catch(() => undefined)

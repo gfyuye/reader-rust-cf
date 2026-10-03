@@ -1,6 +1,9 @@
 import http from './http'
 import type { Book, BookChapter, BookGroup } from '../types'
 import { appendAuthQueryParams } from '../utils/secureAccess'
+import { uploadFileChunked } from '../utils/chunkedUpload'
+
+const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024 // 10MB
 
 export function getBookshelf() {
   return http.get<Book[]>('/getBookshelf').then((r) => r.data)
@@ -23,6 +26,9 @@ export function saveBooks(books: Partial<Book>[]) {
 }
 
 export function uploadTxtBook(file: File, onProgress?: (percent: number) => void) {
+  if (file.size > LARGE_FILE_THRESHOLD) {
+    return uploadFileChunked({ file, fileName: file.name, target: 'bookshelf', onProgress })
+  }
   const formData = new FormData()
   formData.append('file', file)
   return http.post<Book>('/uploadTxtBook', formData, {
@@ -36,6 +42,9 @@ export function uploadTxtBook(file: File, onProgress?: (percent: number) => void
 }
 
 export function uploadEpubBook(file: File, onProgress?: (percent: number) => void) {
+  if (file.size > LARGE_FILE_THRESHOLD) {
+    return uploadFileChunked({ file, fileName: file.name, target: 'bookshelf', onProgress })
+  }
   const formData = new FormData()
   formData.append('file', file)
   return http.post<Book>('/uploadEpubBook', formData, {
@@ -49,6 +58,9 @@ export function uploadEpubBook(file: File, onProgress?: (percent: number) => voi
 }
 
 export function uploadPdfBook(file: File, onProgress?: (percent: number) => void) {
+  if (file.size > LARGE_FILE_THRESHOLD) {
+    return uploadFileChunked({ file, fileName: file.name, target: 'bookshelf', onProgress })
+  }
   const formData = new FormData()
   formData.append('file', file)
   return http.post<Book>('/uploadPdfBook', formData, {
@@ -62,6 +74,9 @@ export function uploadPdfBook(file: File, onProgress?: (percent: number) => void
 }
 
 export function uploadMobiBook(file: File, onProgress?: (percent: number) => void) {
+  if (file.size > LARGE_FILE_THRESHOLD) {
+    return uploadFileChunked({ file, fileName: file.name, target: 'bookshelf', onProgress })
+  }
   const formData = new FormData()
   formData.append('file', file)
   return http.post<Book>('/uploadMobiBook', formData, {
@@ -108,6 +123,10 @@ export function saveBookProgress(params: {
   bookUrl: string
   index: number
   position?: number
+  durChapterIndex?: number
+  durChapterPos?: number
+  durChapterTitle?: string
+  durChapterTime?: number
 }) {
   return http.post<string>('/saveBookProgress', params).then((r) => r.data)
 }

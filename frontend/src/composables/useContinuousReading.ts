@@ -15,7 +15,6 @@ export function useContinuousReading(
   store: ReaderStore,
   renderChapterHtml: (rawText: string) => string,
   isContinuousMode: ComputedRef<boolean>,
-  hideReadChaptersMode: ComputedRef<boolean>,
   scrollContainerRef: Ref<HTMLElement | undefined>,
 ) {
   const continuousChapters = ref<ContinuousChapterItem[]>([])
@@ -23,26 +22,6 @@ export function useContinuousReading(
   const continuousLoadingPrev = ref(false)
   const suppressContinuousSync = ref(false)
   let continuousStateSyncTimer: number | null = null
-
-  function shouldHideChapter(index: number, keepIndex?: number) {
-    if (!hideReadChaptersMode.value) return false
-    if (typeof keepIndex === 'number' && index === keepIndex) return false
-    return store.isChapterRead(index)
-  }
-
-  function findNextVisibleIndex(startIndex: number, keepIndex?: number) {
-    for (let index = startIndex; index < store.chapters.length; index += 1) {
-      if (!shouldHideChapter(index, keepIndex)) {
-        return index
-      }
-    }
-    return -1
-  }
-
-  function pruneReadChapters(targetIndex = store.currentIndex) {
-    if (!hideReadChaptersMode.value) return
-    continuousChapters.value = continuousChapters.value.filter((chapter) => chapter.index >= targetIndex)
-  }
 
   async function buildContinuousChapter(index: number, forceRefresh = false) {
     const chapter = store.chapters[index]
@@ -81,35 +60,34 @@ export function useContinuousReading(
     }, 0)
   }
 
-  async function initializeContinuousChapters(targetIndex = store.currentIndex, smooth = false) {
+  async function initializeContinuousChapters(targetIndex = store.currentIndex, smooth = false, shouldScroll = true) {
     if (!isContinuousMode.value || !store.chapters[targetIndex]) return
 
     const current = await buildContinuousChapter(targetIndex)
     if (!current) return
 
     continuousChapters.value = [current]
-    setContinuousActiveChapter(targetIndex, current.content, 0)
+    setContinuousActiveChapter(targetIndex, current.content, store.chapterScrollProgress || 0)
 
-    await nextTick()
-    scrollToContinuousChapter(targetIndex, smooth)
+    if (shouldScroll) {
+      await nextTick()
+      scrollToContinuousChapter(targetIndex, smooth)
+    }
 
-    const nextIndex = hideReadChaptersMode.value
-      ? findNextVisibleIndex(targetIndex + 1, targetIndex)
-      : targetIndex + 1
-    if (nextIndex < 0) return
-
-    void (async () => {
-      const next = await buildContinuousChapter(nextIndex)
-      if (!next) return
-      if (continuousChapters.value.some((chapter) => chapter.index === next.index)) return
-      continuousChapters.value = [...continuousChapters.value, next]
-    })()
+    const nextIndex = targetIndex + 1
+    if (nextIndex < store.chapters.length) {
+      void (async () => {
+        const next = await buildContinuousChapter(nextIndex)
+        if (!next) return
+        if (continuousChapters.value.some((chapter) => chapter.index === next.index)) return
+        continuousChapters.value = [...continuousChapters.value, next]
+      })()
+    }
   }
 
   async function syncContinuousToStoreState() {
     if (!isContinuousMode.value || suppressContinuousSync.value || store.loading || !store.chapters[store.currentIndex]) return
 
-    pruneReadChapters(store.currentIndex)
     const current = getContinuousChapter(store.currentIndex)
     if (current) {
       if (current.content !== store.content) {
@@ -119,13 +97,13 @@ export function useContinuousReading(
       return
     }
 
-    await initializeContinuousChapters(store.currentIndex, false)
+    await initializeContinuousChapters(store.currentIndex, false, false)
   }
 
   async function loadContinuousNext() {
     if (continuousLoadingNext.value || !continuousChapters.value.length) return
     const last = continuousChapters.value[continuousChapters.value.length - 1]
-    const nextIndex = hideReadChaptersMode.value ? findNextVisibleIndex(last.index + 1, store.currentIndex) : last.index + 1
+    const nextIndex = last.index + 1
     if (nextIndex >= store.chapters.length) return
 
     continuousLoadingNext.value = true
@@ -140,7 +118,6 @@ export function useContinuousReading(
   }
 
   async function loadContinuousPrev() {
-    if (hideReadChaptersMode.value) return
     if (continuousLoadingPrev.value || !continuousChapters.value.length) return
     const first = continuousChapters.value[0]
     const prevIndex = first.index - 1

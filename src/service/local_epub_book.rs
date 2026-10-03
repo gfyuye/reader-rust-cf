@@ -12,9 +12,9 @@ use tokio::fs;
 
 pub const LOCAL_EPUB_ORIGIN: &str = "local-epub";
 pub const LOCAL_EPUB_ORIGIN_NAME: &str = "本地 EPUB";
-pub const MAX_EPUB_UPLOAD_BYTES: usize = 80 * 1024 * 1024;
-const MAX_EPUB_UNPACKED_BYTES: u64 = 300 * 1024 * 1024;
-const MAX_EPUB_FILE_COUNT: usize = 3_000;
+pub const MAX_EPUB_UPLOAD_BYTES: usize = 2048 * 1024 * 1024;
+const MAX_EPUB_UNPACKED_BYTES: u64 = 5120 * 1024 * 1024;
+const MAX_EPUB_FILE_COUNT: usize = 50_000;
 const LOCAL_BOOK_DIR: &str = "local_books";
 const LOCAL_EPUB_HASH_LEN: usize = 32;
 
@@ -332,7 +332,7 @@ fn validate_epub_upload(file_name: &str, byte_len: usize) -> Result<(), AppError
         return Err(AppError::BadRequest("EPUB 文件不能为空".to_string()));
     }
     if byte_len > MAX_EPUB_UPLOAD_BYTES {
-        return Err(AppError::BadRequest("EPUB 文件不能超过 80MB".to_string()));
+        return Err(AppError::BadRequest("EPUB 文件不能超过 2GB".to_string()));
     }
     Ok(())
 }

@@ -15,6 +15,37 @@ import { deleteBrowserBookCache, listBrowserCacheSummary } from '../utils/browse
 import { isLocalBook } from '../utils/localBook'
 import { clearRecentReadBooks, getRecentReadBookKey, loadRecentReadBooks, removeRecentReadBook } from '../utils/recentBooks'
 
+export function sortBooksByLatestReadAndName(list: Book[]): Book[] {
+  if (list.length <= 1) return list.slice()
+
+  let latestIndex = -1
+  let latestTime = 0
+
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i].durChapterTime || 0
+    if (t > latestTime) {
+      latestTime = t
+      latestIndex = i
+    }
+  }
+
+  let latestBook: Book | null = null
+  let others: Book[] = []
+
+  if (latestIndex >= 0 && latestTime > 0) {
+    latestBook = list[latestIndex]
+    others = list.filter((_, idx) => idx !== latestIndex)
+  } else {
+    others = list.slice()
+  }
+
+  others.sort((a, b) =>
+    (a.name || '').localeCompare(b.name || '', 'zh-Hans-CN', { numeric: true, sensitivity: 'base' })
+  )
+
+  return latestBook ? [latestBook, ...others] : others
+}
+
 export const useBookshelfStore = defineStore('bookshelf', () => {
   // ─── Bookshelf ───
   const books = ref<Book[]>([])
@@ -62,10 +93,11 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
         listBrowserCacheSummary().catch(() => []),
       ])
       const browserMap = new Map(browserSummaries.map((item) => [item.bookUrl, item.cachedChapterCount]))
-      books.value = serverBooks.map((book) => ({
+      const rawMapped = serverBooks.map((book) => ({
         ...book,
         browserCachedChapterCount: isLocalBook(book) ? 0 : browserMap.get(book.bookUrl) || 0,
       }))
+      books.value = sortBooksByLatestReadAndName(rawMapped)
       await refreshRecentBooks()
     } finally {
       loading.value = false
@@ -80,10 +112,11 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
         listBrowserCacheSummary().catch(() => []),
       ])
       const browserMap = new Map(browserSummaries.map((item) => [item.bookUrl, item.cachedChapterCount]))
-      books.value = serverBooks.map((book) => ({
+      const rawMapped = serverBooks.map((book) => ({
         ...book,
         browserCachedChapterCount: isLocalBook(book) ? 0 : browserMap.get(book.bookUrl) || 0,
       }))
+      books.value = sortBooksByLatestReadAndName(rawMapped)
       await refreshRecentBooks()
     } finally {
       refreshing.value = false
@@ -249,15 +282,14 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   }
 
   async function moveBookToFront(bookUrl: string) {
-    if (!bookUrl || books.value.length <= 1) return
+    if (!bookUrl || books.value.length === 0) return
 
     const snapshot = books.value.slice()
-    const fromIndex = snapshot.findIndex((book) => book.bookUrl === bookUrl)
-    if (fromIndex <= 0) return
-
-    const next = snapshot.slice()
-    const [moved] = next.splice(fromIndex, 1)
-    next.unshift(moved)
+    const target = snapshot.find((b) => b.bookUrl === bookUrl)
+    if (target) {
+      target.durChapterTime = Date.now()
+    }
+    const next = sortBooksByLatestReadAndName(snapshot)
 
     books.value = next
     sorting.value = true

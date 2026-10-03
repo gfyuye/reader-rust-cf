@@ -9,7 +9,7 @@ use tokio::fs;
 
 pub const LOCAL_TXT_ORIGIN: &str = "local-txt";
 pub const LOCAL_TXT_ORIGIN_NAME: &str = "本地 TXT";
-pub const MAX_TXT_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
+pub const MAX_TXT_UPLOAD_BYTES: usize = 2048 * 1024 * 1024;
 const LOCAL_BOOK_DIR: &str = "local_books";
 const LOCAL_TXT_HASH_LEN: usize = 32;
 
@@ -176,7 +176,7 @@ pub fn validate_txt_upload(file_name: &str, byte_len: usize) -> Result<(), AppEr
         return Err(AppError::BadRequest("TXT 文件不能为空".to_string()));
     }
     if byte_len > MAX_TXT_UPLOAD_BYTES {
-        return Err(AppError::BadRequest("TXT 文件不能超过 50MB".to_string()));
+        return Err(AppError::BadRequest("TXT 文件不能超过 2GB".to_string()));
     }
     Ok(())
 }
