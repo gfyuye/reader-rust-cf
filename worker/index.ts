@@ -2507,11 +2507,11 @@ async function batchInsertMobiChapters(
 
   for (let i = 0; i < chapters.length; i += CHUNK_SIZE) {
     const chunk = chapters.slice(i, i + CHUNK_SIZE);
-    const placeholders = chunk.map(() => "(?1, ?, ?, ?, ?, ?, ?2)").join(", ");
+    const placeholders = chunk.map(() => "(?, ?, ?, ?, ?, ?, ?)").join(", ");
     const sql = `INSERT INTO mobi_chapters (book_id, chapter_index, title, byte_offset, byte_length, compression, created_at) VALUES ${placeholders}`;
-    const params: any[] = [bookId, now];
+    const params: any[] = [];
     for (const ch of chunk) {
-      params.push(ch.index, ch.title, ch.byteOffset, ch.byteLength, ch.compression);
+      params.push(bookId, ch.index, ch.title, ch.byteOffset, ch.byteLength, ch.compression, now);
     }
     statements.push(env.DB.prepare(sql).bind(...params));
   }
@@ -3718,9 +3718,18 @@ async function indexTxtBookFromR2(env: Env, userNs: string, fileName: string, r2
 }
 
 async function indexMobiBookFromR2(env: Env, userNs: string, fileName: string, r2Key: string, fileSize: number) {
-  const headObj = await env.BUCKET.get(r2Key, { range: { offset: 0, length: 16384 } });
-  if (!headObj) throw new Error("无法读取 MOBI 头部");
-  const headBytes = new Uint8Array(await headObj.arrayBuffer());
+  const head78Obj = await env.BUCKET.get(r2Key, { range: { offset: 0, length: 78 } });
+  if (!head78Obj) throw new Error("无法读取 MOBI 头部");
+  const head78 = new Uint8Array(await head78Obj.arrayBuffer());
+  if (head78.length < 78) throw new Error("非法 MOBI 文件");
+
+  const view = new DataView(head78.buffer, head78.byteOffset, head78.byteLength);
+  const numRecords = view.getUint16(76, false);
+  const headerLen = Math.min(fileSize, 78 + numRecords * 8);
+
+  const recTableObj = await env.BUCKET.get(r2Key, { range: { offset: 0, length: headerLen } });
+  if (!recTableObj) throw new Error("无法读取 MOBI 记录表");
+  const headBytes = new Uint8Array(await recTableObj.arrayBuffer());
 
   const pdb = parsePdbRecords(headBytes, fileSize);
   if (!pdb || pdb.recordOffsets.length === 0) throw new Error("非法 MOBI 文件");

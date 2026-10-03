@@ -516,26 +516,50 @@ function formatChapterHtml(rawText: string, chapterTitle?: string) {
       .join('')
   }
 
-  // Deduplicate title: if content's first element text matches the chapter title, remove it
-  if (chapterTitle) {
-    const normTitle = chapterTitle.replace(/[\s\u3000\u00A0]/g, '').toLowerCase()
-    const firstChild = wrapper.firstElementChild as HTMLElement | null
-    if (firstChild) {
-      const childText = (firstChild.textContent || '').replace(/[\s\u3000\u00A0]/g, '').toLowerCase()
-      if (
-        childText &&
-        (childText === normTitle ||
-          (normTitle.length >= 2 && childText.startsWith(normTitle)) ||
-          (childText.length >= 2 && normTitle.startsWith(childText)))
-      ) {
-        firstChild.remove()
-      }
-    }
-  }
+  // Deduplicate title: if content contains a heading matching chapter title or chapter pattern, remove it
+  deduplicateChapterTitle(wrapper, chapterTitle)
 
   appendLocalEpubAssetAuth(wrapper)
   highlightSearchText(wrapper)
   return wrapper.innerHTML
+}
+
+function deduplicateChapterTitle(wrapper: HTMLElement, chapterTitle?: string) {
+  const clean = (s: string) => s.replace(/[\s\u3000\u00A0:：\-_—\-\(\)（）]/g, '').toLowerCase()
+  const normTitle = clean(chapterTitle || '')
+
+  const candidates = Array.from(
+    wrapper.querySelectorAll('h1, h2, h3, h4, h5, [class*="title"], [class*="chapter"], p, div')
+  ) as HTMLElement[]
+
+  for (const el of candidates) {
+    if (el.querySelector('h1, h2, h3, h4, h5, p')) continue
+
+    const rawText = el.textContent || ''
+    const text = clean(rawText)
+    if (!text || text.length > 80) continue
+
+    const matchesTitle =
+      normTitle.length >= 2 &&
+      (text === normTitle ||
+        text.startsWith(normTitle) ||
+        normTitle.startsWith(text) ||
+        (text.length >= 4 && normTitle.includes(text)) ||
+        (normTitle.length >= 4 && text.includes(normTitle)))
+
+    const isChapterHeadingPattern =
+      /^第[0-9一二三四五六七八九十百千万]+[章回节卷集幕篇部]/.test(text) && text.length <= 40
+
+    if (matchesTitle || isChapterHeadingPattern) {
+      const parent = el.parentElement
+      if (parent && parent !== wrapper && parent.children.length === 1 && !parent.querySelector('img')) {
+        parent.remove()
+      } else {
+        el.remove()
+      }
+      break
+    }
+  }
 }
 
 function appendLocalEpubAssetAuth(root: HTMLElement) {
