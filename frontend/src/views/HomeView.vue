@@ -95,6 +95,17 @@
         @change="handleLocalBookFileChange"
       />
 
+      <!-- Local Book Upload Progress Bar -->
+      <div v-if="localBookUploading" class="upload-progress-card">
+        <div class="progress-info">
+          <span>正在导入本地书籍《{{ uploadingFileName }}》...</span>
+          <strong>{{ localBookProgress !== null ? localBookProgress + '%' : '正在处理...' }}</strong>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill" :style="{ width: (localBookProgress || 0) + '%' }"></div>
+        </div>
+      </div>
+
       <!-- Group Tabs -->
       <div class="group-tabs">
         <div class="tabs-scroll">
@@ -193,6 +204,8 @@ const selectedBook = ref<Book | SearchBook | null>(null)
 const openingBookUrl = ref('')
 const localBookFileInputRef = ref<HTMLInputElement | null>(null)
 const localBookUploading = ref(false)
+const uploadingFileName = ref('')
+const localBookProgress = ref<number | null>(null)
 
 onMounted(async () => {
   await appStore.fetchUserInfo()
@@ -232,17 +245,22 @@ async function handleLocalBookFileChange(event: Event) {
     return
   }
 
+  uploadingFileName.value = file.name
+  localBookProgress.value = 0
   localBookUploading.value = true
   try {
+    const onProgress = (percent: number) => {
+      localBookProgress.value = percent
+    }
     let book: Book
     if (lowerName.endsWith('.epub')) {
-      book = await uploadEpubBook(file)
+      book = await uploadEpubBook(file, onProgress)
     } else if (lowerName.endsWith('.txt')) {
-      book = await uploadTxtBook(file)
+      book = await uploadTxtBook(file, onProgress)
     } else if (lowerName.endsWith('.pdf')) {
-      book = await uploadPdfBook(file)
+      book = await uploadPdfBook(file, onProgress)
     } else {
-      book = await uploadMobiBook(file)
+      book = await uploadMobiBook(file, onProgress)
     }
     await shelfStore.fetchBooks()
     appStore.showToast(`已导入《${book.name}》`, 'success')
@@ -251,6 +269,7 @@ async function handleLocalBookFileChange(event: Event) {
     appStore.showToast((e as Error).message || '本地书导入失败', 'error')
   } finally {
     localBookUploading.value = false
+    localBookProgress.value = null
   }
 }
 
@@ -447,6 +466,37 @@ async function handleRefreshBooks() {
 .group-tabs {
   border-bottom: 2px solid var(--color-border-light);
   margin-bottom: var(--space-2);
+}
+
+.upload-progress-card {
+  margin: var(--space-2) var(--space-6);
+  padding: var(--space-2) var(--space-4);
+  background: rgba(var(--color-primary-rgb, 14, 165, 233), 0.08);
+  border: 1px solid rgba(var(--color-primary-rgb, 14, 165, 233), 0.3);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.progress-info {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--text-xs);
+  color: var(--color-primary);
+}
+
+.progress-track {
+  height: 6px;
+  background: var(--color-bg-sunken);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--color-primary);
+  transition: width 0.15s ease-out;
 }
 
 .tabs-scroll {

@@ -22,35 +22,55 @@ export function saveBooks(books: Partial<Book>[]) {
   return http.post<Book[]>('/saveBooks', books).then((r) => r.data)
 }
 
-export function uploadTxtBook(file: File) {
+export function uploadTxtBook(file: File, onProgress?: (percent: number) => void) {
   const formData = new FormData()
   formData.append('file', file)
   return http.post<Book>('/uploadTxtBook', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    onUploadProgress: (e) => {
+      if (onProgress && e.total) {
+        onProgress(Math.round((e.loaded * 100) / e.total))
+      }
+    },
   }).then((r) => r.data)
 }
 
-export function uploadEpubBook(file: File) {
+export function uploadEpubBook(file: File, onProgress?: (percent: number) => void) {
   const formData = new FormData()
   formData.append('file', file)
   return http.post<Book>('/uploadEpubBook', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    onUploadProgress: (e) => {
+      if (onProgress && e.total) {
+        onProgress(Math.round((e.loaded * 100) / e.total))
+      }
+    },
   }).then((r) => r.data)
 }
 
-export function uploadPdfBook(file: File) {
+export function uploadPdfBook(file: File, onProgress?: (percent: number) => void) {
   const formData = new FormData()
   formData.append('file', file)
   return http.post<Book>('/uploadPdfBook', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    onUploadProgress: (e) => {
+      if (onProgress && e.total) {
+        onProgress(Math.round((e.loaded * 100) / e.total))
+      }
+    },
   }).then((r) => r.data)
 }
 
-export function uploadMobiBook(file: File) {
+export function uploadMobiBook(file: File, onProgress?: (percent: number) => void) {
   const formData = new FormData()
   formData.append('file', file)
   return http.post<Book>('/uploadMobiBook', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    onUploadProgress: (e) => {
+      if (onProgress && e.total) {
+        onProgress(Math.round((e.loaded * 100) / e.total))
+      }
+    },
   }).then((r) => r.data)
 }
 

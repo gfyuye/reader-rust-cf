@@ -169,6 +169,9 @@ export default {
       if (path === "/reader3/epub/status" && request.method === "GET") {
         return handleEpubStatus(url.searchParams.get("bookId") || "", env);
       }
+      if (path === "/reader3/epub/asset" && request.method === "GET") {
+        return handleEpubAsset(request, env);
+      }
 
       // 7. PDF Streaming & TOC
       if ((path === "/reader3/pdf/upload" || path === "/reader3/uploadPdfBook") && request.method === "POST") return handlePdfUpload(request, env);
@@ -999,86 +1002,14 @@ async function handleEpubUpload(request: Request, env: Env): Promise<Response> {
       httpMetadata: { contentType: "application/epub+zip" },
     });
 
-    const tailSize = Math.min(65536, fileSize);
-    const tailObj = await env.BUCKET.get(r2Key, {
-      range: { offset: fileSize - tailSize, length: tailSize },
-    });
-    if (!tailObj) return jsonResponse({ isSuccess: false, errorMsg: "无法读取 R2 数据" });
-
-    const tailBytes = new Uint8Array(await tailObj.arrayBuffer());
-    const eocd = findEOCD(tailBytes, fileSize);
-    if (!eocd) return jsonResponse({ isSuccess: false, errorMsg: "未找到 EOCD 记录" });
-
-    const cdObj = await env.BUCKET.get(r2Key, {
-      range: { offset: eocd.cdOffset, length: eocd.cdSize },
-    });
-    if (!cdObj) return jsonResponse({ isSuccess: false, errorMsg: "无法读取中央目录" });
-
-    const cdBytes = new Uint8Array(await cdObj.arrayBuffer());
-    const entries = parseCentralDirectory(cdBytes);
-    const entryMap = new Map(entries.map((e) => [e.fileName, e]));
-
-    const containerEntry = entries.find((e) => e.fileName === "META-INF/container.xml");
-    if (!containerEntry) return jsonResponse({ isSuccess: false, errorMsg: "缺少 container.xml" });
-
-    const containerXml = await readZipEntryText(r2Key, containerEntry, env);
-    const opfPath = parseContainerOpfPath(containerXml);
-    if (!opfPath) return jsonResponse({ isSuccess: false, errorMsg: "缺少 OPF 路径" });
-
-    const opfEntry = entries.find((e) => e.fileName === opfPath);
-    if (!opfEntry) return jsonResponse({ isSuccess: false, errorMsg: `缺少 OPF 文件: ${opfPath}` });
-
-    const opfXml = await readZipEntryText(r2Key, opfEntry, env);
-    const opfDir = opfPath.includes("/") ? opfPath.substring(0, opfPath.lastIndexOf("/")) : "";
-    const { title, author, spinePaths } = parseOpfPackage(opfXml, opfDir);
-
-    const totalChapters = spinePaths.length;
-    const now = Math.floor(Date.now() / 1000);
-
-    const stmts = [];
-    for (let i = 0; i < spinePaths.length; i++) {
-      const path = spinePaths[i];
-      let entry = entryMap.get(path);
-      if (!entry) {
-        const cleanPath = path.replace(/^\.?\//, "");
-        entry = entryMap.get(cleanPath);
-      }
-      if (!entry) {
-        const baseName = path.split("/").pop() || "";
-        entry = entries.find((e) => e.fileName.endsWith("/" + baseName) || e.fileName === baseName);
-      }
-      if (entry) {
-        stmts.push(
-          env.DB.prepare(
-            `INSERT INTO epub_chapters (book_id, chapter_index, title, file_name, byte_offset, byte_length, uncompressed_length, compression_method, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(book_id, chapter_index) DO UPDATE SET byte_offset = excluded.byte_offset, byte_length = excluded.byte_length`
-          ).bind(
-            bookId,
-            i,
-            `第 ${i + 1} 节`,
-            entry.fileName,
-            entry.localHeaderOffset,
-            entry.compressedSize,
-            entry.uncompressedSize,
-            entry.compressionMethod,
-            now
-          )
-        );
-      }
-    }
-
-    for (let i = 0; i < stmts.length; i += 50) {
-      await env.DB.batch(stmts.slice(i, i + 50));
-    }
-
-    await env.DB.prepare(
-      `INSERT INTO epub_books (book_id, user_ns, file_name, r2_key, file_size, status, total_chapters, parsed_chapters, title, author, created_at, updated_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, 'ready', ?6, ?6, ?7, ?8, ?9, ?10)
-       ON CONFLICT(book_id) DO UPDATE SET status='ready', total_chapters=excluded.total_chapters, parsed_chapters=excluded.parsed_chapters, updated_at=excluded.updated_at`
-    )
-      .bind(bookId, userNs, fileName, r2Key, fileSize, totalChapters, title, author, now, now)
-      .run();
+    const { title, author, totalChapters } = await indexEpubIntoDatabase(
+      env,
+      userNs,
+      bookId,
+      fileName,
+      r2Key,
+      fileSize
+    );
 
     const bookUrl = `local-epub:${bookId}`;
     const newBook = {
@@ -1128,13 +1059,13 @@ async function handleEpubRead(bookId: string, chapterIndex: number, env: Env): P
 
 async function readEpubChapterHtml(bookId: string, chapterIndex: number, env: Env): Promise<string> {
   const chapter = await env.DB.prepare(
-    `SELECT c.byte_offset, c.byte_length, c.compression_method, b.r2_key
+    `SELECT c.byte_offset, c.byte_length, c.compression_method, c.file_name, b.r2_key
      FROM epub_chapters c
      JOIN epub_books b ON c.book_id = b.book_id
      WHERE c.book_id = ?1 AND c.chapter_index = ?2`
   )
     .bind(bookId, chapterIndex)
-    .first<{ byte_offset: number; byte_length: number; compression_method: number; r2_key: string }>();
+    .first<{ byte_offset: number; byte_length: number; compression_method: number; file_name: string; r2_key: string }>();
 
   if (!chapter) throw new Error("章节尚未完成分片索引");
 
@@ -1160,17 +1091,29 @@ async function readEpubChapterHtml(bookId: string, chapterIndex: number, env: En
   }
 
   if (!payload) throw new Error("无法读取章节切片数据 (R2 与远端 WebDAV 均未命中)");
+
+  let rawHtml = "";
   if (chapter.compression_method === 0) {
-    return new TextDecoder().decode(payload);
+    rawHtml = new TextDecoder().decode(payload);
   } else if (chapter.compression_method === 8) {
     const ds = new DecompressionStream("deflate-raw");
     const writer = ds.writable.getWriter();
     writer.write(payload);
     writer.close();
     const buf = await new Response(ds.readable).arrayBuffer();
-    return new TextDecoder().decode(buf);
+    rawHtml = new TextDecoder().decode(buf);
+  } else {
+    throw new Error(`不支持的压缩格式: ${chapter.compression_method}`);
   }
-  throw new Error(`不支持的压缩格式: ${chapter.compression_method}`);
+
+  // 1. Slice by anchor if present
+  const anchor = chapter.file_name?.includes("#") ? chapter.file_name.split("#")[1] : "";
+  let html = anchor ? sliceHtmlByAnchor(rawHtml, anchor) : rawHtml;
+
+  // 2. Rewrite all image URLs to /reader3/epub/asset?bookId=...&path=...
+  html = rewriteEpubHtmlAssets(html, bookId, chapter.file_name?.split("#")[0] || "");
+
+  return html;
 }
 
 async function handleEpubStatus(bookId: string, env: Env): Promise<Response> {
@@ -1970,11 +1913,20 @@ function parseContainerOpfPath(xml: string): string | null {
   return match ? match[1] : null;
 }
 
-function parseOpfPackage(xml: string, opfDir: string): { title: string; author: string; spinePaths: string[] } {
+function parseOpfPackage(xml: string, opfDir: string): {
+  title: string;
+  author: string;
+  spinePaths: string[];
+  ncxPath: string | null;
+  navPath: string | null;
+} {
   const titleMatch = xml.match(/<dc:title[^>]*>([^<]+)<\/dc:title>/i);
   const authorMatch = xml.match(/<dc:creator[^>]*>([^<]+)<\/dc:creator>/i);
 
   const manifest = new Map<string, string>();
+  let ncxId: string | null = null;
+  let navPath: string | null = null;
+
   // Match <item ...> regardless of attribute order
   const itemTagRegex = /<item\b([^>]*?)\/?>/gi;
   let match;
@@ -1982,6 +1934,9 @@ function parseOpfPackage(xml: string, opfDir: string): { title: string; author: 
     const attrs = match[1];
     const idMatch = attrs.match(/\bid=["']([^"']+)["']/i);
     const hrefMatch = attrs.match(/\bhref=["']([^"']+)["']/i);
+    const mediaMatch = attrs.match(/\bmedia-type=["']([^"']+)["']/i);
+    const propMatch = attrs.match(/\bproperties=["']([^"']+)["']/i);
+
     if (idMatch && hrefMatch) {
       const id = idMatch[1];
       let href = hrefMatch[1].trim();
@@ -1990,8 +1945,21 @@ function parseOpfPackage(xml: string, opfDir: string): { title: string; author: 
       const cleanHref = href.replace(/^\.?\//, "");
       const fullPath = opfDir ? `${opfDir.replace(/\/$/, "")}/${cleanHref}` : cleanHref;
       manifest.set(id, fullPath);
+
+      if (mediaMatch && mediaMatch[1] === "application/x-dtbncx+xml") {
+        ncxId = id;
+      }
+      if (propMatch && propMatch[1].includes("nav")) {
+        navPath = fullPath;
+      }
     }
   }
+
+  const spineMatch = xml.match(/<spine\b[^>]*\btoc=["']([^"']+)["']/i);
+  if (spineMatch) {
+    ncxId = spineMatch[1];
+  }
+  const ncxPath = ncxId ? manifest.get(ncxId) || null : null;
 
   const spinePaths: string[] = [];
   const itemrefRegex = /<itemref\b([^>]*?)\/?>/gi;
@@ -2019,7 +1987,334 @@ function parseOpfPackage(xml: string, opfDir: string): { title: string; author: 
     title: titleMatch ? titleMatch[1].trim() : "未知书名",
     author: authorMatch ? authorMatch[1].trim() : "未知作者",
     spinePaths,
+    ncxPath,
+    navPath,
   };
+}
+
+interface EpubTocItem {
+  title: string;
+  href: string;
+}
+
+function parseNcxToc(xml: string, opfDir: string): EpubTocItem[] {
+  const items: EpubTocItem[] = [];
+  const navPointRegex = /<navPoint\b[^>]*>([\s\S]*?)<\/navPoint>/gi;
+  let match;
+  while ((match = navPointRegex.exec(xml)) !== null) {
+    const block = match[1];
+    const textMatch = block.match(/<text[^>]*>([\s\S]*?)<\/text>/i);
+    const srcMatch = block.match(/<content\b[^>]*\bsrc=["']([^"']+)["']/i);
+    if (textMatch && srcMatch) {
+      const title = textMatch[1].replace(/<[^>]+>/g, "").trim();
+      let src = srcMatch[1].trim();
+      try { src = decodeURIComponent(src); } catch {}
+      const cleanSrc = src.replace(/^\.?\//, "");
+      const fullPath = opfDir ? `${opfDir.replace(/\/$/, "")}/${cleanSrc}` : cleanSrc;
+      if (title) {
+        items.push({ title, href: fullPath });
+      }
+    }
+  }
+  return items;
+}
+
+function parseNavXhtmlToc(html: string, opfDir: string): EpubTocItem[] {
+  const items: EpubTocItem[] = [];
+  const linkRegex = /<a\b[^>]*\bhref=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let match;
+  while ((match = linkRegex.exec(html)) !== null) {
+    let href = match[1].trim();
+    const title = match[2].replace(/<[^>]+>/g, "").trim();
+    if (title && href) {
+      try { href = decodeURIComponent(href); } catch {}
+      const cleanHref = href.replace(/^\.?\//, "");
+      const fullPath = opfDir ? `${opfDir.replace(/\/$/, "")}/${cleanHref}` : cleanHref;
+      items.push({ title, href: fullPath });
+    }
+  }
+  return items;
+}
+
+function sliceHtmlByAnchor(html: string, anchor: string): string {
+  if (!anchor) return html;
+  const anchorRegex = new RegExp(`(<[^>]+(?:id|name)=["']${anchor}["'][^>]*>)`, "i");
+  const match = anchorRegex.exec(html);
+  if (!match) return html;
+
+  const startIdx = match.index;
+  const afterStart = html.substring(startIdx + match[0].length);
+
+  // Look for next heading tag
+  const nextHeadingRegex = /<(?:h1|h2|h3|h4)\b/i;
+  const nextMatch = nextHeadingRegex.exec(afterStart);
+
+  if (nextMatch && nextMatch.index > 50) {
+    return html.substring(startIdx, startIdx + match[0].length + nextMatch.index);
+  }
+  return html.substring(startIdx);
+}
+
+function rewriteEpubHtmlAssets(html: string, bookId: string, chapterPath: string): string {
+  const baseDir = chapterPath.includes("/") ? chapterPath.substring(0, chapterPath.lastIndexOf("/")) : "";
+
+  function resolveRel(src: string): string {
+    if (src.startsWith("http://") || src.startsWith("https://") || src.startsWith("data:")) {
+      return src;
+    }
+    const cleanSrc = src.trim().replace(/^['"]|['"]$/g, "");
+    const parts = (baseDir ? baseDir.split("/") : []).concat(cleanSrc.split("/"));
+    const resolved: string[] = [];
+    for (const p of parts) {
+      if (!p || p === ".") continue;
+      if (p === "..") resolved.pop();
+      else resolved.push(p);
+    }
+    const resolvedPath = resolved.join("/");
+    return `/reader3/epub/asset?bookId=${encodeURIComponent(bookId)}&path=${encodeURIComponent(resolvedPath)}`;
+  }
+
+  let rewritten = html.replace(/<img\b([^>]*?)\bsrc=["']([^"']+)["']([^>]*?)>/gi, (_match, prefix, src, suffix) => {
+    return `<img${prefix}src="${resolveRel(src)}"${suffix}>`;
+  });
+
+  rewritten = rewritten.replace(/<image\b([^>]*?)\b(?:href|xlink:href)=["']([^"']+)["']([^>]*?)>/gi, (_match, prefix, href, suffix) => {
+    return `<image${prefix}href="${resolveRel(href)}"${suffix}>`;
+  });
+
+  return rewritten;
+}
+
+async function readZipEntryBytes(r2Key: string, entry: CentralDirEntry, env: Env): Promise<Uint8Array> {
+  const localHdrObj = await env.BUCKET.get(r2Key, { range: { offset: entry.localHeaderOffset, length: 30 } });
+  if (!localHdrObj) throw new Error("无法读取本地头");
+  const localHdrBytes = new Uint8Array(await localHdrObj.arrayBuffer());
+  const dataOffset = parseLocalHeaderDataOffset(localHdrBytes, entry.localHeaderOffset);
+
+  const dataObj = await env.BUCKET.get(r2Key, { range: { offset: dataOffset, length: entry.compressedSize } });
+  if (!dataObj) throw new Error("无法读取数据切片");
+  const dataBytes = new Uint8Array(await dataObj.arrayBuffer());
+
+  if (entry.compressionMethod === 0) {
+    return dataBytes;
+  } else if (entry.compressionMethod === 8) {
+    const ds = new DecompressionStream("deflate-raw");
+    const writer = ds.writable.getWriter();
+    writer.write(dataBytes);
+    writer.close();
+    const decompressed = await new Response(ds.readable).arrayBuffer();
+    return new Uint8Array(decompressed);
+  }
+  throw new Error(`不支持的压缩格式: ${entry.compressionMethod}`);
+}
+
+async function handleEpubAsset(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const bookId = url.searchParams.get("bookId") || "";
+  const rawPath = url.searchParams.get("path") || "";
+  if (!bookId || !rawPath) return new Response("Not Found", { status: 404, headers: corsHeaders() });
+
+  const targetPath = decodeURIComponent(rawPath).replace(/^\.?\//, "");
+
+  const book = await env.DB.prepare(
+    `SELECT r2_key, file_size FROM epub_books WHERE book_id = ?1`
+  ).bind(bookId).first<{ r2_key: string; file_size: number }>();
+  if (!book) return new Response("Book Not Found", { status: 404, headers: corsHeaders() });
+
+  const tailSize = Math.min(65536, book.file_size);
+  const tailObj = await env.BUCKET.get(book.r2_key, {
+    range: { offset: book.file_size - tailSize, length: tailSize },
+  });
+  if (!tailObj) return new Response("Failed to read R2", { status: 500, headers: corsHeaders() });
+  const tailBytes = new Uint8Array(await tailObj.arrayBuffer());
+  const eocd = findEOCD(tailBytes, book.file_size);
+  if (!eocd) return new Response("EOCD Not Found", { status: 500, headers: corsHeaders() });
+
+  const cdObj = await env.BUCKET.get(book.r2_key, {
+    range: { offset: eocd.cdOffset, length: eocd.cdSize },
+  });
+  if (!cdObj) return new Response("Central Directory Not Found", { status: 500, headers: corsHeaders() });
+  const cdBytes = new Uint8Array(await cdObj.arrayBuffer());
+  const entries = parseCentralDirectory(cdBytes);
+
+  let entry = entries.find((e) => e.fileName === targetPath || e.fileName.replace(/^\.?\//, "") === targetPath);
+  if (!entry) {
+    const baseName = targetPath.split("/").pop() || "";
+    entry = entries.find((e) => e.fileName.endsWith("/" + baseName) || e.fileName === baseName);
+  }
+
+  if (!entry) return new Response("Asset Not Found", { status: 404, headers: corsHeaders() });
+
+  const imageBytes = await readZipEntryBytes(book.r2_key, entry, env);
+
+  let contentType = "application/octet-stream";
+  const lower = entry.fileName.toLowerCase();
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) contentType = "image/jpeg";
+  else if (lower.endsWith(".png")) contentType = "image/png";
+  else if (lower.endsWith(".gif")) contentType = "image/gif";
+  else if (lower.endsWith(".webp")) contentType = "image/webp";
+  else if (lower.endsWith(".svg")) contentType = "image/svg+xml";
+
+  const headers = new Headers(corsHeaders());
+  headers.set("Content-Type", contentType);
+  headers.set("Cache-Control", "public, max-age=31536000");
+
+  return new Response(imageBytes, { headers });
+}
+
+async function indexEpubIntoDatabase(
+  env: Env,
+  userNs: string,
+  bookId: string,
+  fileName: string,
+  r2Key: string,
+  fileSize: number
+): Promise<{ title: string; author: string; totalChapters: number }> {
+  const tailSize = Math.min(65536, fileSize);
+  const tailObj = await env.BUCKET.get(r2Key, {
+    range: { offset: fileSize - tailSize, length: tailSize },
+  });
+  if (!tailObj) throw new Error("无法读取 R2 数据");
+
+  const tailBytes = new Uint8Array(await tailObj.arrayBuffer());
+  const eocd = findEOCD(tailBytes, fileSize);
+  if (!eocd) throw new Error("未找到 EPUB EOCD 记录");
+
+  const cdObj = await env.BUCKET.get(r2Key, {
+    range: { offset: eocd.cdOffset, length: eocd.cdSize },
+  });
+  if (!cdObj) throw new Error("无法读取中央目录");
+
+  const cdBytes = new Uint8Array(await cdObj.arrayBuffer());
+  const entries = parseCentralDirectory(cdBytes);
+  const entryMap = new Map(entries.map((e) => [e.fileName, e]));
+
+  const containerEntry = entries.find((e) => e.fileName === "META-INF/container.xml");
+  if (!containerEntry) throw new Error("缺少 container.xml");
+
+  const containerXml = await readZipEntryText(r2Key, containerEntry, env);
+  const opfPath = parseContainerOpfPath(containerXml);
+  if (!opfPath) throw new Error("缺少 OPF 路径");
+
+  const opfEntry = entries.find(
+    (e) => e.fileName === opfPath || e.fileName.endsWith("/" + (opfPath?.split("/").pop() || ""))
+  );
+  if (!opfEntry) throw new Error(`缺少 OPF 文件: ${opfPath}`);
+
+  const opfXml = await readZipEntryText(r2Key, opfEntry, env);
+  const opfDir = opfPath.includes("/") ? opfPath.substring(0, opfPath.lastIndexOf("/")) : "";
+  const { title, author, spinePaths, ncxPath, navPath } = parseOpfPackage(opfXml, opfDir);
+
+  // Read TOC (NCX or Nav)
+  let tocItems: EpubTocItem[] = [];
+  const targetNcx = ncxPath || "toc.ncx";
+  let ncxEntry = entries.find(
+    (e) => e.fileName === targetNcx || e.fileName.endsWith("/" + targetNcx) || e.fileName.toLowerCase().endsWith(".ncx")
+  );
+  if (ncxEntry) {
+    try {
+      const ncxXml = await readZipEntryText(r2Key, ncxEntry, env);
+      const ncxDir = ncxEntry.fileName.includes("/") ? ncxEntry.fileName.substring(0, ncxEntry.fileName.lastIndexOf("/")) : "";
+      tocItems = parseNcxToc(ncxXml, ncxDir || opfDir);
+    } catch {}
+  }
+
+  if (tocItems.length === 0 && navPath) {
+    let navEntry = entries.find((e) => e.fileName === navPath || e.fileName.endsWith("/" + navPath));
+    if (navEntry) {
+      try {
+        const navHtml = await readZipEntryText(r2Key, navEntry, env);
+        const navDir = navEntry.fileName.includes("/") ? navEntry.fileName.substring(0, navEntry.fileName.lastIndexOf("/")) : "";
+        tocItems = parseNavXhtmlToc(navHtml, navDir || opfDir);
+      } catch {}
+    }
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const stmts = [];
+  let chapterIndex = 0;
+
+  if (tocItems.length > 0) {
+    for (const item of tocItems) {
+      const filePath = item.href.split("#")[0];
+      let entry = entryMap.get(filePath);
+      if (!entry) {
+        const clean = filePath.replace(/^\.?\//, "");
+        entry = entryMap.get(clean);
+      }
+      if (!entry) {
+        const baseName = filePath.split("/").pop() || "";
+        entry = entries.find((e) => e.fileName.endsWith("/" + baseName) || e.fileName === baseName);
+      }
+      if (entry) {
+        stmts.push(
+          env.DB.prepare(
+            `INSERT INTO epub_chapters (book_id, chapter_index, title, file_name, byte_offset, byte_length, uncompressed_length, compression_method, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(book_id, chapter_index) DO UPDATE SET title = excluded.title, byte_offset = excluded.byte_offset, byte_length = excluded.byte_length`
+          ).bind(
+            bookId,
+            chapterIndex++,
+            item.title,
+            item.href,
+            entry.localHeaderOffset,
+            entry.compressedSize,
+            entry.uncompressedSize,
+            entry.compressionMethod,
+            now
+          )
+        );
+      }
+    }
+  } else {
+    for (let i = 0; i < spinePaths.length; i++) {
+      const path = spinePaths[i];
+      let entry = entryMap.get(path);
+      if (!entry) {
+        const clean = path.replace(/^\.?\//, "");
+        entry = entryMap.get(clean);
+      }
+      if (!entry) {
+        const baseName = path.split("/").pop() || "";
+        entry = entries.find((e) => e.fileName.endsWith("/" + baseName) || e.fileName === baseName);
+      }
+      if (entry) {
+        stmts.push(
+          env.DB.prepare(
+            `INSERT INTO epub_chapters (book_id, chapter_index, title, file_name, byte_offset, byte_length, uncompressed_length, compression_method, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(book_id, chapter_index) DO UPDATE SET title = excluded.title, byte_offset = excluded.byte_offset, byte_length = excluded.byte_length`
+          ).bind(
+            bookId,
+            chapterIndex++,
+            `第 ${i + 1} 章`,
+            entry.fileName,
+            entry.localHeaderOffset,
+            entry.compressedSize,
+            entry.uncompressedSize,
+            entry.compressionMethod,
+            now
+          )
+        );
+      }
+    }
+  }
+
+  for (let i = 0; i < stmts.length; i += 50) {
+    await env.DB.batch(stmts.slice(i, i + 50));
+  }
+
+  const totalChapters = chapterIndex || spinePaths.length;
+
+  await env.DB.prepare(
+    `INSERT INTO epub_books (book_id, user_ns, file_name, r2_key, file_size, status, total_chapters, parsed_chapters, title, author, created_at, updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, 'ready', ?6, ?6, ?7, ?8, ?9, ?10)
+     ON CONFLICT(book_id) DO UPDATE SET status='ready', total_chapters=excluded.total_chapters, parsed_chapters=excluded.parsed_chapters, updated_at=excluded.updated_at`
+  )
+    .bind(bookId, userNs, fileName, r2Key, fileSize, totalChapters, title, author, now, now)
+    .run();
+
+  return { title, author, totalChapters };
 }
 
 // === PDB / MOBI Format Helpers ===
@@ -3179,58 +3474,14 @@ async function handleImportWebdavBook(request: Request, env: Env, ctx: Execution
     };
   } else if (lower.endsWith(".epub")) {
     const bookId = `epub_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-    const tailSize = Math.min(65536, fileSize);
-    const tailBytes = bodyBytes.subarray(fileSize - tailSize);
-    const eocd = findEOCD(tailBytes, fileSize);
-    if (!eocd) return jsonResponse({ isSuccess: false, errorMsg: "未找到 EPUB EOCD 记录" });
-
-    const cdBytes = bodyBytes.subarray(eocd.cdOffset, eocd.cdOffset + eocd.cdSize);
-    const entries = parseCentralDirectory(cdBytes);
-    const entryMap = new Map(entries.map((e) => [e.fileName, e]));
-
-    const containerEntry = entries.find((e) => e.fileName === "META-INF/container.xml");
-    if (!containerEntry) return jsonResponse({ isSuccess: false, errorMsg: "缺少 container.xml" });
-    const containerXml = await readZipEntryText(targetKey, containerEntry, env);
-    const opfPath = parseContainerOpfPath(containerXml);
-    if (!opfPath) return jsonResponse({ isSuccess: false, errorMsg: "缺少 OPF 路径" });
-
-    const opfEntry = entries.find((e) => e.fileName === opfPath);
-    if (!opfEntry) return jsonResponse({ isSuccess: false, errorMsg: `缺少 OPF 文件: ${opfPath}` });
-    const opfXml = await readZipEntryText(targetKey, opfEntry, env);
-    const opfDir = opfPath.includes("/") ? opfPath.substring(0, opfPath.lastIndexOf("/")) : "";
-    const { title, author, spinePaths } = parseOpfPackage(opfXml, opfDir);
-
-    const now = Math.floor(Date.now() / 1000);
-    const stmts = [];
-    for (let i = 0; i < spinePaths.length; i++) {
-      const path = spinePaths[i];
-      let entry = entryMap.get(path);
-      if (!entry) {
-        const cleanPath = path.replace(/^\.?\//, "");
-        entry = entryMap.get(cleanPath);
-      }
-      if (!entry) {
-        const baseName = path.split("/").pop() || "";
-        entry = entries.find((e) => e.fileName.endsWith("/" + baseName) || e.fileName === baseName);
-      }
-      if (entry) {
-        stmts.push(
-          env.DB.prepare(
-            `INSERT INTO epub_chapters (book_id, chapter_index, title, file_name, byte_offset, byte_length, uncompressed_length, compression_method, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(book_id, chapter_index) DO UPDATE SET byte_offset = excluded.byte_offset, byte_length = excluded.byte_length`
-          ).bind(bookId, i, `第 ${i + 1} 节`, entry.fileName, entry.localHeaderOffset, entry.compressedSize, entry.uncompressedSize, entry.compressionMethod, now)
-        );
-      }
-    }
-    for (let i = 0; i < stmts.length; i += 50) {
-      await env.DB.batch(stmts.slice(i, i + 50));
-    }
-
-    await env.DB.prepare(
-      `INSERT INTO epub_books (book_id, user_ns, file_name, r2_key, file_size, status, total_chapters, parsed_chapters, title, author, created_at, updated_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, 'ready', ?6, ?6, ?7, ?8, ?9, ?10)`
-    ).bind(bookId, userNs, name, targetKey, fileSize, spinePaths.length, title, author, now, now).run();
+    const { title, author, totalChapters } = await indexEpubIntoDatabase(
+      env,
+      userNs,
+      bookId,
+      name,
+      targetKey,
+      fileSize
+    );
 
     const bookUrl = `local-epub:${bookId}`;
     newBook = {
@@ -3245,7 +3496,7 @@ async function handleImportWebdavBook(request: Request, env: Env, ctx: Execution
       durChapterPos: 0,
       durChapterTitle: "第 1 节",
       durChapterTime: Date.now(),
-      totalChapterNum: spinePaths.length,
+      totalChapterNum: totalChapters,
       kind: "本地EPUB",
     };
   } else if (lower.endsWith(".pdf")) {
