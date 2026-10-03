@@ -205,7 +205,6 @@ export function useContinuousReading(
     ensureContinuousChapterLoaded,
     getContinuousSections,
     scrollToContinuousChapter,
-    pruneReadChapters,
     clearContinuousChapters,
     disposeContinuousReading,
   }

@@ -358,7 +358,7 @@ export const useReaderStore = defineStore('reader', () => {
 
   watch(
     () => config.chineseMode,
-    (mode) => {
+    () => {
       void ensureChineseConverterLoaded()
     },
     { immediate: true },
