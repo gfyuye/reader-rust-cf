@@ -1476,8 +1476,8 @@ async function handleMobiUpload(request: Request, env: Env): Promise<Response> {
 
     await env.DB.prepare(
       `INSERT INTO mobi_books (book_id, user_ns, file_name, r2_key, file_size, total_chapters, title, author, compression, status, created_at, updated_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '未知作者', ?8, 'ready', ?9, ?10)`
-    ).bind(bookId, userNs, fileName, r2Key, fileSize, totalChapters, title, mobiHeader.compression, now, now).run();
+       VALUES (?, ?, ?, ?, ?, ?, ?, '未知作者', ?, 'ready', ?, ?)`
+    ).bind(bookId, userNs, fileName, r2Key, fileSize, totalChapters, title, mobiHeader.compression || 1, now, now).run();
 
     const mobiChapters: Array<{ index: number; title: string; byteOffset: number; byteLength: number; compression: number }> = [];
     for (let i = 1; i <= totalChapters; i++) {
@@ -1645,7 +1645,8 @@ function getAccessToken(request: Request): string | null {
   const match = cookie.match(/token=([^;]+)/);
   if (match) return decodeURIComponent(match[1]);
 
-  return new URL(request.url).searchParams.get("accessToken");
+  const url = new URL(request.url);
+  return url.searchParams.get("accessToken") || url.searchParams.get("token");
 }
 
 function isAuthorizedAdmin(request: Request, env: Env): boolean {
@@ -3538,128 +3539,142 @@ async function handleTxtInfo(bookId: string, env: Env): Promise<Response> {
 }
 
 async function handleImportWebdavBook(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  const userNs = await resolveUserNs(request, env);
-  if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
+  try {
+    const userNs = await resolveUserNs(request, env);
+    if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
-  const { path: relPath, name } = await request.json<any>();
-  if (!name) return jsonResponse({ isSuccess: false, errorMsg: "缺少文件名" });
+    const { path: relPath, name } = await request.json<any>();
+    if (!name) return jsonResponse({ isSuccess: false, errorMsg: "缺少文件名" });
 
-  const cleanRel = (relPath || "").replace(/^\/+/, "");
-  const sourceKey = `webdav/${userNs}/${cleanRel}`;
-  const targetClean = cleanRel.startsWith("book/") ? cleanRel : `book/${name}`;
-  const targetKey = `webdav/${userNs}/${targetClean}`;
+    const cleanRel = (relPath || "").replace(/^\/+/, "");
+    const sourceKey = `webdav/${userNs}/${cleanRel}`;
+    const targetClean = cleanRel.startsWith("book/") ? cleanRel : `book/${name}`;
+    const targetKey = `webdav/${userNs}/${targetClean}`;
 
-  // 1. Move file to /book/ if not already inside it
-  const moved = sourceKey !== targetKey;
-  if (moved) {
-    const sourceObj = await env.BUCKET.get(sourceKey);
-    if (!sourceObj) return jsonResponse({ isSuccess: false, errorMsg: "WebDAV 文件未找到" });
-    await env.BUCKET.put(targetKey, sourceObj.body, {
-      httpMetadata: sourceObj.httpMetadata,
-    });
-    await env.BUCKET.delete(sourceKey);
-  }
-
-  // 2. Fetch target object from R2 to index
-  const targetObj = await env.BUCKET.get(targetKey);
-  if (!targetObj) return jsonResponse({ isSuccess: false, errorMsg: "无法读取目标书籍文件" });
-
-  const fileSize = targetObj.size;
-  const lower = name.toLowerCase();
-
-  let newBook: any = null;
-
-  if (lower.endsWith(".epub")) {
-    const bookId = `epub_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-    const { title, author, totalChapters } = await indexEpubIntoDatabase(
-      env,
-      userNs,
-      bookId,
-      name,
-      targetKey,
-      fileSize
-    );
-
-    const bookUrl = `local-epub:${bookId}`;
-    newBook = {
-      name: title,
-      author: author,
-      bookUrl,
-      origin: "local-epub",
-      originName: "本地 EPUB",
-      tocUrl: bookUrl,
-      canUpdate: false,
-      durChapterIndex: 0,
-      durChapterPos: 0,
-      durChapterTitle: "第 1 节",
-      durChapterTime: Date.now(),
-      totalChapterNum: totalChapters,
-      kind: "本地EPUB",
-    };
-  } else if (lower.endsWith(".txt")) {
-    newBook = await indexTxtBookFromR2(env, userNs, name, targetKey, fileSize);
-  } else if (lower.endsWith(".pdf")) {
-    const bookId = `pdf_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-    const tailSize = Math.min(65536, fileSize);
-    const tailObj = await env.BUCKET.get(targetKey, { range: { offset: Math.max(0, fileSize - tailSize), length: tailSize } });
-    const tailBytes = tailObj ? new Uint8Array(await tailObj.arrayBuffer()) : new Uint8Array(0);
-    const tailText = new TextDecoder().decode(tailBytes);
-    const countMatch = tailText.match(/\/Count\s+(\d+)/);
-    const totalPages = countMatch ? parseInt(countMatch[1], 10) : 1;
-    const titleMatch = tailText.match(/\/Title\s*\(([^)]+)\)/);
-    const authorMatch = tailText.match(/\/Author\s*\(([^)]+)\)/);
-    const title = titleMatch ? titleMatch[1].trim() : name.replace(/\.pdf$/i, "");
-    const author = authorMatch ? authorMatch[1].trim() : "未知作者";
-    const now = Math.floor(Date.now() / 1000);
-
-    await env.DB.prepare(
-      `INSERT INTO pdf_books (book_id, user_ns, file_name, r2_key, file_size, total_pages, title, author, status, created_at, updated_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'ready', ?9, ?10)`
-    ).bind(bookId, userNs, name, targetKey, fileSize, totalPages, title, author, now, now).run();
-
-    const bookUrl = `local-pdf:${bookId}`;
-    newBook = {
-      name: title,
-      author: author,
-      bookUrl,
-      origin: "local-pdf",
-      originName: "本地 PDF",
-      tocUrl: bookUrl,
-      canUpdate: false,
-      durChapterIndex: 0,
-      durChapterPos: 0,
-      durChapterTitle: "第 1 页",
-      durChapterTime: Date.now(),
-      totalChapterNum: totalPages,
-      kind: "本地PDF",
-    };
-  } else if (lower.endsWith(".mobi") || lower.endsWith(".prc")) {
-    newBook = await indexMobiBookFromR2(env, userNs, name, targetKey, fileSize);
-  }
-
-  if (newBook) {
-    let shelf: any[] = (await getDocument(env, userNs, "bookshelf.json")) || [];
-    const existingIdx = shelf.findIndex(
-      (b) => b.bookUrl === newBook.bookUrl || (b.name === newBook.name && b.origin === newBook.origin)
-    );
-    if (existingIdx >= 0) {
-      shelf[existingIdx] = {
-        ...shelf[existingIdx],
-        ...newBook,
-        bookUrl: shelf[existingIdx].bookUrl,
-        durChapterTime: Date.now(),
-      };
-    } else {
-      shelf.unshift(newBook);
+    // 1. Move file to /book/ if not already inside it
+    const moved = sourceKey !== targetKey;
+    if (moved) {
+      const sourceObj = await env.BUCKET.get(sourceKey);
+      if (!sourceObj) {
+        const remoteBytes = await fallbackFetchFromRemoteWebdav(env, sourceKey);
+        if (remoteBytes) {
+          await env.BUCKET.put(targetKey, remoteBytes);
+        } else {
+          return jsonResponse({ isSuccess: false, errorMsg: "WebDAV 文件未找到" });
+        }
+      } else {
+        await env.BUCKET.put(targetKey, sourceObj.body, {
+          httpMetadata: sourceObj.httpMetadata,
+        });
+        await env.BUCKET.delete(sourceKey);
+      }
     }
-    await saveDocument(env, userNs, "bookshelf.json", shelf);
-    triggerOnChangeSync(env, userNs, ctx);
-  }
 
-  return jsonResponse({
-    isSuccess: true,
-    data: { moved, book: newBook },
-  });
+    // 2. Fetch target object from R2 to index
+    const targetObj = await env.BUCKET.get(targetKey);
+    if (!targetObj) return jsonResponse({ isSuccess: false, errorMsg: "无法读取目标书籍文件" });
+
+    const fileSize = targetObj.size;
+    const lower = name.toLowerCase();
+
+    let newBook: any = null;
+
+    if (lower.endsWith(".epub")) {
+      const bookId = `epub_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+      const { title, author, totalChapters } = await indexEpubIntoDatabase(
+        env,
+        userNs,
+        bookId,
+        name,
+        targetKey,
+        fileSize
+      );
+
+      const bookUrl = `local-epub:${bookId}`;
+      newBook = {
+        name: title,
+        author: author,
+        bookUrl,
+        origin: "local-epub",
+        originName: "本地 EPUB",
+        tocUrl: bookUrl,
+        canUpdate: false,
+        durChapterIndex: 0,
+        durChapterPos: 0,
+        durChapterTitle: "第 1 节",
+        durChapterTime: Date.now(),
+        totalChapterNum: totalChapters,
+        kind: "本地EPUB",
+      };
+    } else if (lower.endsWith(".txt")) {
+      newBook = await indexTxtBookFromR2(env, userNs, name, targetKey, fileSize);
+    } else if (lower.endsWith(".pdf")) {
+      const bookId = `pdf_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+      const tailSize = Math.min(65536, fileSize);
+      const tailObj = await env.BUCKET.get(targetKey, { range: { offset: Math.max(0, fileSize - tailSize), length: tailSize } });
+      const tailBytes = tailObj ? new Uint8Array(await tailObj.arrayBuffer()) : new Uint8Array(0);
+      const tailText = new TextDecoder().decode(tailBytes);
+      const countMatch = tailText.match(/\/Count\s+(\d+)/);
+      const totalPages = countMatch ? parseInt(countMatch[1], 10) : 1;
+      const titleMatch = tailText.match(/\/Title\s*\(([^)]+)\)/);
+      const authorMatch = tailText.match(/\/Author\s*\(([^)]+)\)/);
+      const title = titleMatch ? titleMatch[1].trim() : name.replace(/\.pdf$/i, "");
+      const author = authorMatch ? authorMatch[1].trim() : "未知作者";
+      const now = Math.floor(Date.now() / 1000);
+
+      await env.DB.prepare(
+        `INSERT INTO pdf_books (book_id, user_ns, file_name, r2_key, file_size, total_pages, title, author, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)`
+      ).bind(bookId, userNs, name, targetKey, fileSize, totalPages, title, author, now, now).run();
+
+      const bookUrl = `local-pdf:${bookId}`;
+      newBook = {
+        name: title,
+        author: author,
+        bookUrl,
+        origin: "local-pdf",
+        originName: "本地 PDF",
+        tocUrl: bookUrl,
+        canUpdate: false,
+        durChapterIndex: 0,
+        durChapterPos: 0,
+        durChapterTitle: "第 1 页",
+        durChapterTime: Date.now(),
+        totalChapterNum: totalPages,
+        kind: "本地PDF",
+      };
+    } else if (lower.endsWith(".mobi") || lower.endsWith(".prc")) {
+      newBook = await indexMobiBookFromR2(env, userNs, name, targetKey, fileSize);
+    }
+
+    if (newBook) {
+      let shelf: any[] = (await getDocument(env, userNs, "bookshelf.json")) || [];
+      const existingIdx = shelf.findIndex(
+        (b) => b.bookUrl === newBook.bookUrl || (b.name === newBook.name && b.origin === newBook.origin)
+      );
+      if (existingIdx >= 0) {
+        shelf[existingIdx] = {
+          ...shelf[existingIdx],
+          ...newBook,
+          bookUrl: shelf[existingIdx].bookUrl,
+          durChapterTime: Date.now(),
+        };
+      } else {
+        shelf.unshift(newBook);
+      }
+      await saveDocument(env, userNs, "bookshelf.json", shelf);
+      triggerOnChangeSync(env, userNs, ctx);
+    }
+
+    return jsonResponse({
+      isSuccess: true,
+      data: { moved, book: newBook },
+    });
+  } catch (err: any) {
+    console.error("handleImportWebdavBook error:", err);
+    return jsonResponse({ isSuccess: false, errorMsg: err.message || "导入 WebDAV 书籍失败" });
+  }
+}
 }
 
 async function indexTxtBookFromR2(env: Env, userNs: string, fileName: string, r2Key: string, fileSize: number) {
@@ -3748,8 +3763,8 @@ async function indexMobiBookFromR2(env: Env, userNs: string, fileName: string, r
 
   await env.DB.prepare(
     `INSERT INTO mobi_books (book_id, user_ns, file_name, r2_key, file_size, total_chapters, title, author, compression, status, created_at, updated_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '未知作者', ?8, 'ready', ?9, ?10)`
-  ).bind(bookId, userNs, fileName, r2Key, fileSize, totalChapters, title, mobiHeader.compression, now, now).run();
+     VALUES (?, ?, ?, ?, ?, ?, ?, '未知作者', ?, 'ready', ?, ?)`
+  ).bind(bookId, userNs, fileName, r2Key, fileSize, totalChapters, title, mobiHeader.compression || 1, now, now).run();
 
   const mobiChapters: Array<{ index: number; title: string; byteOffset: number; byteLength: number; compression: number }> = [];
   for (let i = 1; i <= totalChapters; i++) {
@@ -4632,14 +4647,34 @@ async function handleGetWebdavFile(request: Request, env: Env): Promise<Response
   const url = new URL(request.url);
   const relPath = (url.searchParams.get("path") || "").replace(/^\/+/, "");
   const r2Key = `webdav/${userNs}/${relPath}`;
+  const fileName = relPath.split("/").pop() || "file";
 
   const obj = await env.BUCKET.get(r2Key);
-  if (!obj) return new Response("File Not Found", { status: 404, headers: corsHeaders() });
+  let bodyStream: any = null;
+  let byteLen = 0;
+  let contentType = "application/octet-stream";
+
+  if (obj) {
+    bodyStream = obj.body;
+    byteLen = obj.size;
+    contentType = obj.httpMetadata?.contentType || contentType;
+  } else {
+    const remoteBytes = await fallbackFetchFromRemoteWebdav(env, r2Key);
+    if (remoteBytes) {
+      bodyStream = remoteBytes;
+      byteLen = remoteBytes.length;
+    }
+  }
+
+  if (!bodyStream) {
+    return new Response("File Not Found", { status: 404, headers: corsHeaders() });
+  }
 
   const headers = new Headers(corsHeaders());
-  headers.set("Content-Type", obj.httpMetadata?.contentType || "application/octet-stream");
-  headers.set("Content-Length", obj.size.toString());
-  return new Response(obj.body, { headers });
+  headers.set("Content-Type", contentType);
+  headers.set("Content-Length", byteLen.toString());
+  headers.set("Content-Disposition", `attachment; filename="${encodeURIComponent(fileName)}"; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+  return new Response(bodyStream, { headers });
 }
 
 async function handleUploadFileToWebdav(request: Request, env: Env): Promise<Response> {

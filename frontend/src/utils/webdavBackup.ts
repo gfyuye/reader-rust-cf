@@ -116,25 +116,55 @@ export async function restoreBackupFromBytes(bytes: Uint8Array): Promise<void> {
     const files = await unzipArchive(bytes)
     const decoder = new TextDecoder()
 
+    // Normalize file map to index by both original path and base file name
+    const normalizedFiles: Record<string, Uint8Array> = {}
+    for (const [pathKey, fileData] of Object.entries(files)) {
+      normalizedFiles[pathKey] = fileData
+      const cleanKey = pathKey.replace(/\\/g, '/')
+      const baseName = cleanKey.split('/').pop() || cleanKey
+      normalizedFiles[baseName.toLowerCase()] = fileData
+      normalizedFiles[baseName] = fileData
+    }
+
     const knownKeys = [
       'bookshelf.json',
-      'bookSource.json',
-      'bookGroup.json',
+      'booksource.json',
+      'bookgroup.json',
       'bookmark.json',
-      'replaceRule.json',
-      'rssSource.json',
-      'readConfig.json',
-      'txtTocRule.json',
-      'httpTTS.json',
+      'replacerule.json',
+      'rsssource.json',
+      'readconfig.json',
+      'txttocrule.json',
+      'httptts.json',
+      'backup.json',
+      'legado.json',
     ]
 
-    const hasAnyBackupFile = knownKeys.some((k) => k in files)
+    // 1. Check if the ZIP contains an all-in-one backup file (e.g. backup.json or legado.json)
+    const singleBackupData =
+      normalizedFiles['backup.json'] ||
+      normalizedFiles['legado.json'] ||
+      normalizedFiles['my_backup.json'] ||
+      Object.entries(normalizedFiles).find(([k]) => k.endsWith('.json') && !knownKeys.includes(k))?.[1]
+
+    if (singleBackupData && !normalizedFiles['bookshelf.json']) {
+      try {
+        const singleText = decoder.decode(singleBackupData)
+        const payload = parseWebdavBackup(singleText)
+        await restoreWebdavBackup(payload)
+        return
+      } catch {
+        // Fall through to multi-file parsing
+      }
+    }
+
+    const hasAnyBackupFile = knownKeys.some((k) => k in normalizedFiles)
     if (!hasAnyBackupFile) {
-      throw new Error('该 ZIP 压缩包不包含有效的阅读备份文件 (未找到 bookshelf.json 等)')
+      throw new Error('该 ZIP 压缩包不包含有效的阅读备份文件 (未找到 bookshelf.json / backup.json 等)')
     }
 
     const parseJson = <T>(name: string, fallback: T): T => {
-      const data = files[name]
+      const data = normalizedFiles[name.toLowerCase()] || normalizedFiles[name]
       if (!data) return fallback
       try {
         return JSON.parse(decoder.decode(data)) as T
@@ -196,23 +226,27 @@ export async function restoreWebdavBackup(payload: WebdavBackupPayload) {
   const currentReplaceRules = await getReplaceRules().catch(() => [])
   const currentRssSources = await getRssSources().catch(() => [])
 
-  await Promise.all([
-    currentGroups.length
-      ? Promise.all(currentGroups.map((group) => deleteBookGroup(group.groupId)))
-      : Promise.resolve(),
-    currentBooks.length
-      ? deleteBooks(currentBooks.map((book) => ({ bookUrl: book.bookUrl, origin: book.origin })) as Book[])
-      : Promise.resolve(),
-    currentBookmarks.length ? deleteBookmarks(currentBookmarks) : Promise.resolve(),
-    currentReplaceRules.length ? deleteReplaceRules(currentReplaceRules) : Promise.resolve(),
-    currentRssSources.length
-      ? Promise.all(currentRssSources.map((source) => deleteRssSource({
-          sourceUrl: source.sourceUrl,
-          sourceName: source.sourceName,
-        })))
-      : Promise.resolve(),
-    deleteAllBookSources().catch(() => undefined),
-  ])
+  try {
+    await Promise.allSettled([
+      currentGroups.length
+        ? Promise.all(currentGroups.map((group) => deleteBookGroup(group.groupId).catch(() => undefined)))
+        : Promise.resolve(),
+      currentBooks.length
+        ? deleteBooks(currentBooks.map((book) => ({ bookUrl: book.bookUrl, origin: book.origin })) as Book[]).catch(() => undefined)
+        : Promise.resolve(),
+      currentBookmarks.length ? deleteBookmarks(currentBookmarks).catch(() => undefined) : Promise.resolve(),
+      currentReplaceRules.length ? deleteReplaceRules(currentReplaceRules).catch(() => undefined) : Promise.resolve(),
+      currentRssSources.length
+        ? Promise.all(currentRssSources.map((source) => deleteRssSource({
+            sourceUrl: source.sourceUrl,
+            sourceName: source.sourceName,
+          }).catch(() => undefined)))
+        : Promise.resolve(),
+      deleteAllBookSources().catch(() => undefined),
+    ])
+  } catch {
+    // Continue restoring payload even if clearing old records had partial errors
+  }
 
   if (payload.bookSources.length) {
     await saveBookSources(payload.bookSources)

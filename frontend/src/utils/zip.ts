@@ -45,12 +45,25 @@ async function compressDeflate(data: Uint8Array): Promise<{ bytes: Uint8Array; m
  */
 async function decompressDeflate(data: Uint8Array): Promise<Uint8Array> {
   if (typeof DecompressionStream !== "undefined") {
-    const ds = new DecompressionStream("deflate-raw");
-    const writer = ds.writable.getWriter();
-    await writer.write(data as unknown as BufferSource);
-    await writer.close();
-    const decompressed = await new Response(ds.readable).arrayBuffer();
-    return new Uint8Array(decompressed);
+    try {
+      const ds = new DecompressionStream("deflate-raw");
+      const writer = ds.writable.getWriter();
+      await writer.write(data as unknown as BufferSource);
+      await writer.close();
+      const decompressed = await new Response(ds.readable).arrayBuffer();
+      return new Uint8Array(decompressed);
+    } catch {
+      try {
+        const ds2 = new DecompressionStream("deflate");
+        const writer2 = ds2.writable.getWriter();
+        await writer2.write(data as unknown as BufferSource);
+        await writer2.close();
+        const decompressed2 = await new Response(ds2.readable).arrayBuffer();
+        return new Uint8Array(decompressed2);
+      } catch (err: any) {
+        throw new Error("解压 Deflate 数据失败: " + (err.message || String(err)));
+      }
+    }
   }
   throw new Error("当前环境不支持 DecompressionStream，无法解压 Deflate 数据");
 }

@@ -42,6 +42,16 @@
                   class="hidden-input"
                   @change="handleUpload"
                 />
+                <button class="action-btn" :disabled="working" @click="triggerRestoreLocalBackup">
+                  导入本地备份
+                </button>
+                <input
+                  ref="backupFileInputRef"
+                  type="file"
+                  accept=".zip,.json"
+                  class="hidden-input"
+                  @change="handleLocalBackupFileChange"
+                />
               </div>
               <button
                 class="action-btn danger"
@@ -157,6 +167,7 @@ import {
   createLegadoBackupZip,
   restoreBackupFromBytes,
 } from '../utils/webdavBackup'
+import { buildAuthHeaderValues } from '../utils/secureAccess'
 
 type EntryRow = WebdavFileEntry & { toParent?: boolean }
 
@@ -170,6 +181,7 @@ const emit = defineEmits<{
 
 const appStore = useAppStore()
 const fileInputRef = ref<HTMLInputElement | null>(null)
+const backupFileInputRef = ref<HTMLInputElement | null>(null)
 const currentPath = ref('/')
 const entries = ref<EntryRow[]>([])
 const selectedPaths = ref<string[]>([])
@@ -357,6 +369,34 @@ async function createBackup() {
   }
 }
 
+function triggerRestoreLocalBackup() {
+  backupFileInputRef.value?.click()
+}
+
+async function handleLocalBackupFileChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  if (!confirm(`确定导入并恢复备份《${file.name}》吗？这会覆盖当前书架、书源、RSS、书签和相关本地配置。`)) {
+    input.value = ''
+    return
+  }
+  working.value = true
+  try {
+    const arrayBuffer = await file.arrayBuffer()
+    await restoreBackupFromBytes(new Uint8Array(arrayBuffer))
+    appStore.showToast('恢复完成，正在刷新页面', 'success')
+    window.setTimeout(() => {
+      window.location.reload()
+    }, 800)
+  } catch (error) {
+    appStore.showToast((error as Error).message || '恢复失败', 'error')
+    working.value = false
+  } finally {
+    input.value = ''
+  }
+}
+
 async function downloadEntry(entry: EntryRow) {
   working.value = true
   try {
@@ -367,10 +407,21 @@ async function downloadEntry(entry: EntryRow) {
     link.download = entry.name
     document.body.appendChild(link)
     link.click()
-    link.remove()
-    URL.revokeObjectURL(url)
-  } catch (error) {
-    appStore.showToast((error as Error).message || '下载失败', 'error')
+    window.setTimeout(() => {
+      link.remove()
+      URL.revokeObjectURL(url)
+    }, 2000)
+    appStore.showToast(`开始下载《${entry.name}》`, 'success')
+  } catch {
+    try {
+      const { accessToken, secureKey } = buildAuthHeaderValues(localStorage)
+      const q = new URLSearchParams({ path: entry.path })
+      if (accessToken) q.set('token', accessToken)
+      if (secureKey) q.set('key', secureKey)
+      window.open(`/reader3/getWebdavFile?${q.toString()}`, '_blank')
+    } catch (e: any) {
+      appStore.showToast(e.message || '下载失败', 'error')
+    }
   } finally {
     working.value = false
   }
