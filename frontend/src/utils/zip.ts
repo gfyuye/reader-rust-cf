@@ -25,40 +25,33 @@ export function crc32(data: Uint8Array): number {
  * Compress data with Deflate-raw if supported, or fallback to uncompressed (Store)
  */
 async function compressDeflate(data: Uint8Array): Promise<{ bytes: Uint8Array; method: number }> {
+  if (data.length === 0) return { bytes: new Uint8Array(0), method: 0 };
   if (typeof CompressionStream !== "undefined") {
     try {
-      const cs = new CompressionStream("deflate-raw");
-      const writer = cs.writable.getWriter();
-      await writer.write(data as unknown as BufferSource);
-      await writer.close();
-      const compressed = await new Response(cs.readable).arrayBuffer();
-      return { bytes: new Uint8Array(compressed), method: 8 }; // Deflated
+      const stream = new Response(data as unknown as BodyInit).body!.pipeThrough(new CompressionStream("deflate-raw"));
+      const compressed = await new Response(stream).arrayBuffer();
+      return { bytes: new Uint8Array(compressed), method: 8 };
     } catch {
       // Fallback to uncompressed
     }
   }
-  return { bytes: data, method: 0 }; // Stored
+  return { bytes: data, method: 0 };
 }
 
 /**
  * Decompress Deflate-raw data using standard DecompressionStream
  */
 async function decompressDeflate(data: Uint8Array): Promise<Uint8Array> {
+  if (data.length === 0) return new Uint8Array(0);
   if (typeof DecompressionStream !== "undefined") {
     try {
-      const ds = new DecompressionStream("deflate-raw");
-      const writer = ds.writable.getWriter();
-      await writer.write(data as unknown as BufferSource);
-      await writer.close();
-      const decompressed = await new Response(ds.readable).arrayBuffer();
+      const stream = new Response(data as unknown as BodyInit).body!.pipeThrough(new DecompressionStream("deflate-raw"));
+      const decompressed = await new Response(stream).arrayBuffer();
       return new Uint8Array(decompressed);
     } catch {
       try {
-        const ds2 = new DecompressionStream("deflate");
-        const writer2 = ds2.writable.getWriter();
-        await writer2.write(data as unknown as BufferSource);
-        await writer2.close();
-        const decompressed2 = await new Response(ds2.readable).arrayBuffer();
+        const stream2 = new Response(data as unknown as BodyInit).body!.pipeThrough(new DecompressionStream("deflate"));
+        const decompressed2 = await new Response(stream2).arrayBuffer();
         return new Uint8Array(decompressed2);
       } catch (err: any) {
         throw new Error("解压 Deflate 数据失败: " + (err.message || String(err)));
@@ -259,6 +252,11 @@ export async function unzipArchive(
     const localExtraLen = localView.getUint16(28, true);
 
     const dataOffset = localHeaderOffset + 30 + localNameLen + localExtraLen;
+    if (compressedSize === 0) {
+      files[fileName] = new Uint8Array(0);
+      continue;
+    }
+
     const compressedData = zipData.subarray(dataOffset, dataOffset + compressedSize);
 
     if (compressionMethod === 0) {

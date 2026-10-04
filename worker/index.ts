@@ -1163,11 +1163,8 @@ async function readEpubChapterHtml(bookId: string, chapterIndex: number, env: En
   if (chapter.compression_method === 0) {
     rawHtml = new TextDecoder().decode(payload);
   } else if (chapter.compression_method === 8) {
-    const ds = new DecompressionStream("deflate-raw");
-    const writer = ds.writable.getWriter();
-    writer.write(payload);
-    writer.close();
-    const buf = await new Response(ds.readable).arrayBuffer();
+    const stream = new Response(payload as unknown as BodyInit).body!.pipeThrough(new DecompressionStream("deflate-raw"));
+    const buf = await new Response(stream).arrayBuffer();
     rawHtml = new TextDecoder().decode(buf);
   } else {
     throw new Error(`不支持的压缩格式: ${chapter.compression_method}`);
@@ -2014,11 +2011,8 @@ async function readZipEntryText(r2Key: string, entry: CentralDirEntry, env: Env)
   if (entry.compressionMethod === 0) {
     return new TextDecoder().decode(dataBytes);
   } else if (entry.compressionMethod === 8) {
-    const ds = new DecompressionStream("deflate-raw");
-    const writer = ds.writable.getWriter();
-    writer.write(dataBytes);
-    writer.close();
-    const decompressed = await new Response(ds.readable).arrayBuffer();
+    const stream = new Response(dataBytes as unknown as BodyInit).body!.pipeThrough(new DecompressionStream("deflate-raw"));
+    const decompressed = await new Response(stream).arrayBuffer();
     return new TextDecoder().decode(decompressed);
   }
   throw new Error(`不支持的压缩格式: ${entry.compressionMethod}`);
@@ -2224,11 +2218,8 @@ async function readZipEntryBytes(r2Key: string, entry: CentralDirEntry, env: Env
   if (entry.compressionMethod === 0) {
     return dataBytes;
   } else if (entry.compressionMethod === 8) {
-    const ds = new DecompressionStream("deflate-raw");
-    const writer = ds.writable.getWriter();
-    writer.write(dataBytes);
-    writer.close();
-    const decompressed = await new Response(ds.readable).arrayBuffer();
+    const stream = new Response(dataBytes as unknown as BodyInit).body!.pipeThrough(new DecompressionStream("deflate-raw"));
+    const decompressed = await new Response(stream).arrayBuffer();
     return new Uint8Array(decompressed);
   }
   throw new Error(`不支持的压缩格式: ${entry.compressionMethod}`);
