@@ -234,7 +234,21 @@ async function handleLocalBookFileChange(event: Event) {
   input.value = ''
   if (!file) return
 
-  const lowerName = file.name.toLowerCase()
+  const cleanName = file.name.trim()
+  const nameWithoutExt = cleanName.replace(/\.[^/.]+$/, '').trim()
+  const lowerName = cleanName.toLowerCase()
+
+  // Check if book already exists on shelf
+  const isDuplicate = shelfStore.books.some((b) => {
+    const bName = (b.name || '').trim()
+    return bName === cleanName || bName === nameWithoutExt || (b.bookUrl && b.bookUrl.toLowerCase().endsWith('/' + lowerName))
+  })
+
+  if (isDuplicate) {
+    appStore.showToast(`文件已存在：《${cleanName}》`, 'warning')
+    return
+  }
+
   if (
     !lowerName.endsWith('.txt') &&
     !lowerName.endsWith('.epub') &&

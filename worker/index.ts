@@ -2503,23 +2503,17 @@ async function batchInsertMobiChapters(
   chapters: Array<{ index: number; title: string; byteOffset: number; byteLength: number; compression: number }>,
   now: number
 ) {
-  const CHUNK_SIZE = 30;
-  const statements: D1PreparedStatement[] = [];
+  if (!chapters.length) return;
+  const stmts = chapters.map((ch) =>
+    env.DB.prepare(
+      `INSERT INTO mobi_chapters (book_id, chapter_index, title, byte_offset, byte_length, compression, created_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+       ON CONFLICT(book_id, chapter_index) DO UPDATE SET byte_offset=excluded.byte_offset, byte_length=excluded.byte_length, title=excluded.title`
+    ).bind(bookId, ch.index, ch.title, ch.byteOffset, ch.byteLength, ch.compression, now)
+  );
 
-  for (let i = 0; i < chapters.length; i += CHUNK_SIZE) {
-    const chunk = chapters.slice(i, i + CHUNK_SIZE);
-    const placeholders = chunk.map(() => "(?, ?, ?, ?, ?, ?, ?)").join(", ");
-    const sql = `INSERT INTO mobi_chapters (book_id, chapter_index, title, byte_offset, byte_length, compression, created_at) VALUES ${placeholders}`;
-    const params: any[] = [];
-    for (const ch of chunk) {
-      params.push(bookId, ch.index, ch.title, ch.byteOffset, ch.byteLength, ch.compression, now);
-    }
-    statements.push(env.DB.prepare(sql).bind(...params));
-  }
-
-  const BATCH_SIZE = 25;
-  for (let j = 0; j < statements.length; j += BATCH_SIZE) {
-    await env.DB.batch(statements.slice(j, j + BATCH_SIZE));
+  for (let i = 0; i < stmts.length; i += 50) {
+    await env.DB.batch(stmts.slice(i, i + 50));
   }
 }
 

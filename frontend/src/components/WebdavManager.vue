@@ -323,6 +323,17 @@ async function handleUpload(event: Event) {
   const input = event.target as HTMLInputElement
   const files = Array.from(input.files || [])
   if (!files.length) return
+
+  // Check if any file already exists in current WebDAV directory
+  const existingNames = new Set(entries.value.filter((e) => !e.isDirectory).map((e) => e.name.toLowerCase()))
+  const duplicates = files.filter((f) => existingNames.has(f.name.toLowerCase()))
+  if (duplicates.length > 0) {
+    const dupText = duplicates.map((f) => `《${f.name}》`).join('、')
+    appStore.showToast(`文件已存在：${dupText}`, 'warning')
+    input.value = ''
+    return
+  }
+
   working.value = true
   uploadProgress.value = 0
   try {
@@ -462,8 +473,10 @@ async function restoreBackup(entry: EntryRow) {
   }
 
   working.value = true
+  appStore.showToast(`正在读取备份《${entry.name}》...`)
   try {
     const blob = await getWebdavFileBlob(entry.path)
+    appStore.showToast('正在解析并恢复备份数据...')
     const arrayBuffer = await blob.arrayBuffer()
     await restoreBackupFromBytes(new Uint8Array(arrayBuffer))
     appStore.showToast('恢复完成，正在刷新页面', 'success')
@@ -471,12 +484,25 @@ async function restoreBackup(entry: EntryRow) {
       window.location.reload()
     }, 800)
   } catch (error) {
+    console.error('restoreBackup error:', error)
     appStore.showToast((error as Error).message || '恢复失败', 'error')
     working.value = false
   }
 }
 
 async function importToShelf(entry: EntryRow) {
+  const cleanName = entry.name.trim()
+  const nameWithoutExt = cleanName.replace(/\.[^/.]+$/, '').trim()
+  const isDuplicate = shelfStore.books.some((b) => {
+    const bName = (b.name || '').trim()
+    return bName === cleanName || bName === nameWithoutExt
+  })
+
+  if (isDuplicate) {
+    appStore.showToast(`文件已存在，该书籍已在书架中：《${cleanName}》`, 'warning')
+    return
+  }
+
   working.value = true
   try {
     const res = await importWebdavBook(entry.path, entry.name)

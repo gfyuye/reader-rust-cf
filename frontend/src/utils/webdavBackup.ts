@@ -248,23 +248,36 @@ export async function restoreWebdavBackup(payload: WebdavBackupPayload) {
     // Continue restoring payload even if clearing old records had partial errors
   }
 
-  if (payload.bookSources.length) {
-    await saveBookSources(payload.bookSources)
-  }
-  if (payload.rssSources.length) {
-    await saveRssSources(payload.rssSources)
-  }
+  // 1. Restore groups and bookshelf FIRST so user can immediately see their library
   for (const group of payload.bookshelf.groups) {
-    await saveBookGroup(group)
+    await saveBookGroup(group).catch(() => undefined)
   }
   if (payload.bookshelf.books.length) {
-    await saveBooks(payload.bookshelf.books)
+    await saveBooks(payload.bookshelf.books).catch(() => undefined)
   }
+
+  // 2. Restore bookmarks & replace rules
   if (payload.bookmarks.length) {
-    await saveBookmarks(payload.bookmarks)
+    await saveBookmarks(payload.bookmarks).catch(() => undefined)
   }
   if (payload.replaceRules.length) {
-    await saveReplaceRules(payload.replaceRules)
+    await saveReplaceRules(payload.replaceRules).catch(() => undefined)
+  }
+
+  // 3. Restore RSS sources
+  if (payload.rssSources.length) {
+    await saveRssSources(payload.rssSources).catch(() => undefined)
+  }
+
+  // 4. Restore Book sources in chunks of 80 to prevent network/subrequest timeout on huge backups
+  if (payload.bookSources.length) {
+    const CHUNK_SIZE = 80
+    for (let i = 0; i < payload.bookSources.length; i += CHUNK_SIZE) {
+      const slice = payload.bookSources.slice(i, i + CHUNK_SIZE)
+      await saveBookSources(slice).catch((err) => {
+        console.warn('saveBookSources batch error:', err)
+      })
+    }
   }
 
   applyLocalState(payload.localState)
