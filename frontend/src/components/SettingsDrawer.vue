@@ -67,46 +67,16 @@
           <section class="drawer-section">
             <h3 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-                <path d="M12 3a4 4 0 0 0-4 4v2H7a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a4 4 0 0 0-4-4Z" />
-                <path d="M9 9V7a3 3 0 0 1 6 0v2" />
-              </svg>
-              管理密码
-            </h3>
-            <div class="status-card">
-              <span>{{ appStore.secureKeyRequired ? '服务端已配置管理密码' : '服务端未配置管理密码' }}</span>
-              <small>
-                {{
-                  appStore.secureKeyRequired
-                    ? (appStore.adminAuthorized ? '当前请求已具备管理员权限。' : '保存后会随请求自动附带 X-Secure-Key。')
-                    : '未配置时只依赖管理员账号登录态。'
-                }}
-              </small>
-            </div>
-            <div class="password-panel embedded">
-              <label class="password-field">
-                <span>管理密码</span>
-                <input v-model="secureKeyInput" type="password" autocomplete="off" placeholder="输入服务端 SECURE_KEY" />
-              </label>
-              <div class="password-actions">
-                <button class="action-btn primary" @click="handleSaveSecureKey">保存管理密码</button>
-                <button class="action-btn" :disabled="!appStore.secureKey" @click="handleClearSecureKey">清除</button>
-              </div>
-            </div>
-          </section>
-
-          <section class="drawer-section">
-            <h3 class="section-title">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
                 <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" />
               </svg>
-              &#20070;&#28304;&#31649;&#29702;
+              书源管理
             </h3>
             <div class="btn-group">
               <button class="action-btn" @click="openSourceManager">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
                   <path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
                 </svg>
-                &#20070;&#28304;&#31649;&#29702;
+                书源管理
               </button>
             </div>
           </section>
@@ -119,19 +89,15 @@
                 <path d="M19 8v6" />
                 <path d="M22 11h-6" />
               </svg>
-              &#29992;&#25143;&#31649;&#29702;
+              用户管理
             </h3>
-            <div v-if="appStore.isSecureMode" class="status-card">
+            <div class="status-card">
               <span>{{ userManagerTitle }}</span>
               <small>{{ userManagerMessage }}</small>
             </div>
-            <div v-else class="status-card">
-              <span>&#24403;&#21069;&#26410;&#24320;&#21551;&#23433;&#20840;&#27169;&#24335;</span>
-              <small>&#29992;&#25143;&#31649;&#29702;&#20165;&#22312;&#22810;&#29992;&#25143;&#23433;&#20840;&#27169;&#24335;&#19979;&#21487;&#29992;&#12290;</small>
-            </div>
             <div class="btn-group">
-              <button class="action-btn" :disabled="!canManageUsers" @click="openUserManager">
-                &#29992;&#25143;&#31649;&#29702;
+              <button class="action-btn" @click="handleClickUserManager">
+                用户管理
               </button>
             </div>
           </section>
@@ -366,11 +332,30 @@
       <RemoteWebdavModal v-model="showRemoteWebdavModal" />
       <AiSettingsDrawer v-model="showAiSettingsDrawer" />
     </Transition>
+    <div v-if="showVerifyAdminModal" class="verify-admin-overlay" @click="showVerifyAdminModal = false">
+      <div class="verify-admin-modal" @click.stop>
+        <h3 class="verify-title">验证管理密码</h3>
+        <p class="verify-desc">访问用户管理前，请输入服务端的管理密码：</p>
+        <input
+          v-model="adminPasswordInput"
+          type="password"
+          class="verify-input"
+          placeholder="请输入管理密码"
+          @keyup.enter="handleConfirmVerifyAdmin"
+        />
+        <div class="verify-actions">
+          <button class="mini-btn" @click="showVerifyAdminModal = false">取消</button>
+          <button class="mini-btn primary" :disabled="verifyingAdmin" @click="handleConfirmVerifyAdmin">
+            {{ verifyingAdmin ? '验证中...' : '确认' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </Teleport>
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import RemoteWebdavModal from './RemoteWebdavModal.vue'
 import AiSettingsDrawer from './AiSettingsDrawer.vue'
 import { useAppStore } from '../stores/app'
@@ -390,14 +375,12 @@ const shelfStore = useBookshelfStore()
 const appVersion = __APP_VERSION__
 const showPasswordPanel = ref(false)
 const changingPassword = ref(false)
-const secureKeyInput = ref(appStore.secureKey)
 const passwordForm = reactive({
   oldPassword: '',
   newPassword: '',
   confirmPassword: '',
 })
 
-const canManageUsers = computed(() => appStore.isSecureMode && appStore.adminAuthorized)
 const userManagerTitle = computed(() => {
   if (appStore.adminAuthorized) return '\u5f53\u524d\u8bf7\u6c42\u5df2\u5177\u5907\u7ba1\u7406\u5458\u6743\u9650'
   if (!appStore.isLoggedIn) return '\u767b\u5f55\u540e\u53ef\u67e5\u770b\u72b6\u6001'
@@ -412,18 +395,16 @@ const userManagerMessage = computed(() => {
     ? '\u652f\u6301\u65b0\u589e\u7528\u6237\u3001\u91cd\u7f6e\u5bc6\u7801\u3001\u5220\u9664\u7528\u6237\u548c\u8c03\u6574\u6743\u9650\u3002'
     : '\u8bf7\u4f7f\u7528\u7ba1\u7406\u5458\u8d26\u53f7\u767b\u5f55\u540e\u518d\u8fdb\u884c\u7528\u6237\u7ba1\u7406\u3002'
 })
-const canOpenWebdav = computed(() => appStore.isSecureMode && appStore.isLoggedIn && !!appStore.userInfo?.enableWebdav)
+const canOpenWebdav = computed(() => appStore.isLoggedIn && !!appStore.userInfo?.enableWebdav)
 const webdavStatusTitle = computed(() => {
-  if (!appStore.isSecureMode) return '仅安全模式支持云端文件管理'
   if (!appStore.isLoggedIn) return '登录后可用'
   return appStore.userInfo?.enableWebdav ? '当前账号已开通文件管理' : '当前账号未开通文件管理'
 })
 const webdavStatusMessage = computed(() => {
-  if (!appStore.isSecureMode) return '为避免共享空间冲突，请先开启多用户安全模式。'
   if (!appStore.isLoggedIn) return '登录并具备文件权限后，可管理云端文件并将书籍导入书架。'
   return appStore.userInfo?.enableWebdav
     ? '支持云端文件浏览、直接将 TXT/EPUB/PDF/MOBI 导入至书架，以及管理备份文件。'
-    : '请在用户管理中为当前账号开启文件管理权限。'
+    : '请联系管理员为当前账号开通文件管理权限。'
 })
 const versionUpdateTitle = computed(() => {
   const info = appStore.versionUpdate
@@ -448,13 +429,6 @@ const versionUpdateMessage = computed(() => {
   return `当前 ${info.currentVersion}。`
 })
 
-watch(
-  () => appStore.secureKey,
-  (value) => {
-    secureKeyInput.value = value
-  },
-)
-
 function close() {
   emit('update:modelValue', false)
 }
@@ -470,19 +444,6 @@ async function handleLogout() {
   await appStore.fetchUserInfo()
   close()
   shelfStore.fetchBooks()
-}
-
-async function handleSaveSecureKey() {
-  appStore.setSecureKey(secureKeyInput.value)
-  await appStore.fetchUserInfo()
-  appStore.showToast(appStore.adminAuthorized ? '管理密码已生效' : '管理密码已保存，但当前仍未通过管理员校验', appStore.adminAuthorized ? 'success' : 'warning')
-}
-
-async function handleClearSecureKey() {
-  secureKeyInput.value = ''
-  appStore.setSecureKey('')
-  await appStore.fetchUserInfo()
-  appStore.showToast('已清除管理密码', 'success')
 }
 
 function resetPasswordForm() {
@@ -525,9 +486,45 @@ function openSourceManager() {
   appStore.showSourceManager = true
 }
 
-function openUserManager() {
-  close()
-  appStore.showUserManager = true
+const showVerifyAdminModal = ref(false)
+const adminPasswordInput = ref('')
+const verifyingAdmin = ref(false)
+
+async function handleClickUserManager() {
+  if (appStore.adminAuthorized) {
+    close()
+    appStore.showUserManager = true
+    return
+  }
+  adminPasswordInput.value = ''
+  showVerifyAdminModal.value = true
+}
+
+async function handleConfirmVerifyAdmin() {
+  const pwd = adminPasswordInput.value.trim()
+  if (!pwd) {
+    appStore.showToast('请输入管理密码', 'warning')
+    return
+  }
+  verifyingAdmin.value = true
+  try {
+    appStore.setSecureKey(pwd)
+    await appStore.fetchUserInfo()
+    if (!appStore.adminAuthorized) {
+      appStore.setSecureKey('')
+      appStore.showToast('管理密码验证失败', 'error')
+      return
+    }
+    showVerifyAdminModal.value = false
+    appStore.showToast('验证成功，已进入管理模式', 'success')
+    close()
+    appStore.showUserManager = true
+  } catch (err: any) {
+    appStore.setSecureKey('')
+    appStore.showToast(err.message || '验证失败', 'error')
+  } finally {
+    verifyingAdmin.value = false
+  }
 }
 
 function openWebdavManager() {
@@ -937,5 +934,60 @@ async function handleCheckVersionUpdate() {
 
 .theme-option:hover:not(.active) {
   border-color: var(--color-border);
+}
+
+.verify-admin-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(4px);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.verify-admin-modal {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
+  padding: 24px;
+  width: 100%;
+  max-width: 380px;
+  box-shadow: 0 16px 32px rgba(0, 0, 0, 0.2);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.verify-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.verify-desc {
+  margin: 0;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.verify-input {
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-subtle, var(--color-bg));
+  font-size: 14px;
+  color: var(--color-text);
+  box-sizing: border-box;
+}
+
+.verify-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 6px;
 }
 </style>

@@ -134,11 +134,32 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   const groups = ref<BookGroup[]>([])
   const activeGroupId = ref<number>(-1) // -1 = all
 
+  function ensureSystemGroups(raw: BookGroup[]): BookGroup[] {
+    const list = (raw || []).slice()
+    let allGroup = list.find((g) => g.groupId === -1 || g.groupName === '全部')
+    if (!allGroup) {
+      allGroup = { groupId: -1, groupName: '全部', orderNo: -100 }
+      list.unshift(allGroup)
+    } else {
+      allGroup.groupId = -1
+      allGroup.groupName = '全部'
+    }
+
+    let ungrouped = list.find((g) => g.groupId === 0 || g.groupName === '未分组')
+    if (!ungrouped) {
+      ungrouped = { groupId: 0, groupName: '未分组', orderNo: 1000 }
+      list.push(ungrouped)
+    } else {
+      ungrouped.groupId = 0
+      ungrouped.groupName = '未分组'
+    }
+
+    list.sort((a, b) => (a.orderNo ?? 0) - (b.orderNo ?? 0))
+    return list
+  }
+
   const displayGroups = computed(() => {
-    const all: BookGroup = { groupId: -1, groupName: '全部' }
-    const ungrouped: BookGroup = { groupId: 0, groupName: '未分组' }
-    const visibleGroups = groups.value.filter((g) => !g.hidden && g.show !== false)
-    return [all, ...visibleGroups, ungrouped]
+    return groups.value.filter((g) => !g.hidden && g.show !== false)
   })
 
   const filteredBooks = computed(() => {
@@ -154,16 +175,14 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   async function fetchGroups() {
     try {
       const raw = await getBookGroups()
-      // Filter out system groups that are already provided by displayGroups
-      groups.value = (raw || []).filter(
-        (g) => g && g.groupId !== -1 && g.groupId !== 0 && g.groupName !== '全部' && g.groupName !== '未分组'
-      )
+      groups.value = ensureSystemGroups(raw || [])
     } catch {
-      groups.value = []
+      groups.value = ensureSystemGroups([])
     }
   }
 
   async function saveGroup(groupName: string, groupId = 0) {
+    if (groupId === -1 || groupId === 0) return groupId
     let existingGroup = groups.value.find((g) => g.groupId === groupId)
     if (groupId <= 0) {
       const existingIds = groups.value.map((g) => g.groupId).filter((id) => id > 0)
@@ -194,6 +213,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   }
 
   async function removeGroup(groupId: number) {
+    if (groupId === -1 || groupId === 0) return
     await apiDeleteBookGroup(groupId)
     groups.value = groups.value.filter((group) => group.groupId !== groupId)
     books.value = books.value.map((book) => {

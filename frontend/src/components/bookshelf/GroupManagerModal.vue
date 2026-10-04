@@ -42,7 +42,12 @@
                     <circle cx="15" cy="19" r="1.5" fill="currentColor" />
                   </svg>
                 </div>
-                <input v-model.trim="editingNames[group.groupId]" class="group-input" />
+                <input
+                  v-model.trim="editingNames[group.groupId]"
+                  class="group-input"
+                  :disabled="group.groupId === -1 || group.groupId === 0"
+                />
+                <span v-if="group.groupId === -1 || group.groupId === 0" class="system-tag">默认</span>
                 <div class="group-actions">
                   <button
                     class="mini-btn"
@@ -52,8 +57,20 @@
                   >
                     {{ group.hidden ? '已隐藏' : '显示中' }}
                   </button>
-                  <button class="mini-btn" @click="renameGroup(group.groupId)">保存</button>
-                  <button class="mini-btn danger" @click="deleteGroup(group.groupId, group.groupName)">删除</button>
+                  <button
+                    v-if="group.groupId !== -1 && group.groupId !== 0"
+                    class="mini-btn"
+                    @click="renameGroup(group.groupId)"
+                  >
+                    保存
+                  </button>
+                  <button
+                    v-if="group.groupId !== -1 && group.groupId !== 0"
+                    class="mini-btn danger"
+                    @click="deleteGroup(group.groupId, group.groupName)"
+                  >
+                    删除
+                  </button>
                 </div>
               </div>
             </div>
@@ -268,6 +285,15 @@ function handleDragEnd() {
   border-radius: 12px;
   padding: 10px 12px;
   background: var(--color-bg);
+}
+
+.system-tag {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  background: var(--color-bg-subtle, rgba(0, 0, 0, 0.05));
+  padding: 2px 6px;
+  border-radius: 6px;
+  white-space: nowrap;
 }
 
 .group-actions {

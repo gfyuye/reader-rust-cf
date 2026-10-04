@@ -529,10 +529,21 @@ async function handleSaveBookSources(request: Request, env: Env, ctx: ExecutionC
   const sources = await request.json<any[]>();
   if (!Array.isArray(sources)) return jsonResponse({ isSuccess: false, errorMsg: "格式错误" });
 
+  const existingRows = await env.DB.prepare(
+    `SELECT book_source_url, json FROM book_sources WHERE user_ns = ?1`
+  ).bind(userNs).all<{ book_source_url: string; json: string }>();
+  const existingMap = new Map((existingRows.results || []).map((r) => [r.book_source_url, r.json]));
+
   const now = Math.floor(Date.now() / 1000);
-  const stmts = sources
-    .filter((s) => s && s.bookSourceUrl)
-    .map((s) =>
+  const toWrite = sources.filter((s) => {
+    if (!s || !s.bookSourceUrl) return false;
+    const oldJson = existingMap.get(s.bookSourceUrl);
+    if (!oldJson) return true;
+    return oldJson !== JSON.stringify(s);
+  });
+
+  if (toWrite.length > 0) {
+    const stmts = toWrite.map((s) =>
       env.DB.prepare(
         `INSERT INTO book_sources (user_ns, book_source_url, book_source_name, json, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5)
@@ -541,12 +552,13 @@ async function handleSaveBookSources(request: Request, env: Env, ctx: ExecutionC
       ).bind(userNs, s.bookSourceUrl, s.bookSourceName || "", JSON.stringify(s), now)
     );
 
-  for (let i = 0; i < stmts.length; i += 50) {
-    await env.DB.batch(stmts.slice(i, i + 50));
+    for (let i = 0; i < stmts.length; i += 50) {
+      await env.DB.batch(stmts.slice(i, i + 50));
+    }
   }
 
   triggerOnChangeSync(env, userNs, ctx);
-  return jsonResponse({ isSuccess: true, data: `成功导入 ${stmts.length} 个书源` });
+  return jsonResponse({ isSuccess: true, data: `成功同步 ${sources.length} 个书源 (更新 ${toWrite.length} 项)` });
 }
 
 async function handleDeleteBookSource(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -930,13 +942,22 @@ async function getDocument(env: Env, namespace: string, name: string): Promise<a
 }
 
 async function saveDocument(env: Env, namespace: string, name: string, data: any): Promise<void> {
+  const jsonStr = JSON.stringify(data);
+  const existing = await env.DB.prepare(
+    `SELECT json FROM json_documents WHERE namespace = ?1 AND name = ?2`
+  ).bind(namespace, name).first<{ json: string }>();
+
+  if (existing && existing.json === jsonStr) {
+    return;
+  }
+
   const now = Math.floor(Date.now() / 1000);
   await env.DB.prepare(
     `INSERT INTO json_documents (namespace, name, json, updated_at)
      VALUES (?1, ?2, ?3, ?4)
      ON CONFLICT(namespace, name) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at`
   )
-    .bind(namespace, name, JSON.stringify(data), now)
+    .bind(namespace, name, jsonStr, now)
     .run();
 }
 
@@ -1768,37 +1789,28 @@ async function handleMobiUpload(request: Request, env: Env): Promise<Response> {
     const totalChapters = Math.min(mobiHeader.textRecordCount, pdb.recordOffsets.length - 1);
     const now = Math.floor(Date.now() / 1000);
 
+    // Decompress first 3 records in memory to detect TOC
+    let introText = "";
+    try {
+      if (pdb.recordOffsets.length > 1) {
+        const maxIntroRec = Math.min(4, pdb.recordOffsets.length - 1);
+        for (let r = 1; r <= maxIntroRec; r++) {
+          const byteOffset = pdb.recordOffsets[r];
+          const byteLength = (r + 1 < pdb.recordOffsets.length ? pdb.recordOffsets[r + 1] : fileSize) - byteOffset;
+          const recBytes = bodyBytes.subarray(byteOffset, byteOffset + byteLength);
+          const decomp = mobiHeader.compression === 2 ? decompressPalmDoc(recBytes) : recBytes;
+          introText += decodeMobiBytes(decomp);
+        }
+      }
+    } catch {}
+
+    const mobiChapters = buildMobiChapters(pdb, totalChapters, fileSize, mobiHeader.compression || 1, introText);
+    const finalChapterCount = mobiChapters.length;
+
     await env.DB.prepare(
       `INSERT INTO mobi_books (book_id, user_ns, file_name, r2_key, file_size, total_chapters, title, author, compression, status, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, '未知作者', ?, 'ready', ?, ?)`
-    ).bind(bookId, userNs, fileName, r2Key, fileSize, totalChapters, title, mobiHeader.compression || 1, now, now).run();
-
-    const mobiChapters: Array<{ index: number; title: string; byteOffset: number; byteLength: number; compression: number }> = [];
-    for (let i = 1; i <= totalChapters; i++) {
-      if (i >= pdb.recordOffsets.length) break;
-      const byteOffset = pdb.recordOffsets[i];
-      const byteLength = i + 1 < pdb.recordOffsets.length ? pdb.recordOffsets[i + 1] - byteOffset : fileSize - byteOffset;
-      const recSample = bodyBytes.subarray(byteOffset, byteOffset + Math.min(256, byteLength));
-      let chTitle = `第 ${i} 节`;
-      try {
-        const decompSample = mobiHeader.compression === 2 ? decompressPalmDoc(recSample, 512) : recSample;
-        let recText = "";
-        try {
-          recText = new TextDecoder("utf-8").decode(decompSample);
-        } catch {
-          recText = new TextDecoder("gb18030").decode(decompSample);
-        }
-        chTitle = extractMobiChapterTitle(recText, i);
-      } catch {}
-
-      mobiChapters.push({
-        index: i - 1,
-        title: chTitle,
-        byteOffset,
-        byteLength,
-        compression: mobiHeader.compression,
-      });
-    }
+    ).bind(bookId, userNs, fileName, r2Key, fileSize, finalChapterCount, title, mobiHeader.compression || 1, now, now).run();
 
     await batchInsertMobiChapters(env, bookId, mobiChapters, now);
 
@@ -2750,44 +2762,114 @@ function parseMobiHeader(rec0: Uint8Array): { compression: number; textRecordCou
   return { compression, textRecordCount, title };
 }
 
-function decompressPalmDoc(data: Uint8Array, maxOut = 16384): Uint8Array {
-  const out = new Uint8Array(maxOut);
+function decompressPalmDoc(data: Uint8Array): Uint8Array {
+  const out = new Uint8Array(4096);
   let outLen = 0;
   let i = 0;
-  while (i < data.length && outLen < maxOut) {
+  const len = data.length;
+
+  while (i < len && outLen < 4096) {
     const b = data[i++];
     if (b === 0x00) {
       out[outLen++] = 0;
     } else if (b <= 0x08) {
-      const count = Math.min(b, data.length - i, maxOut - outLen);
-      out.set(data.subarray(i, i + count), outLen);
-      outLen += count;
-      i += b;
+      const count = Math.min(b, len - i, 4096 - outLen);
+      for (let k = 0; k < count; k++) {
+        out[outLen++] = data[i + k];
+      }
+      i += count;
     } else if (b <= 0x7f) {
       out[outLen++] = b;
     } else if (b <= 0xbf) {
-      if (i < data.length) {
-        const next = data[i++];
-        const distance = ((b & 0x3f) << 3) | (next >> 5);
-        const length = (next & 0x07) + 3;
+      if (i < len) {
+        const c = data[i++];
+        const distance = ((b & 0x3f) << 3) | (c >> 5);
+        const length = (c & 0x07) + 3;
         if (distance > 0 && distance <= outLen) {
-          const copyLen = Math.min(length, maxOut - outLen);
+          const start = outLen - distance;
+          const copyLen = Math.min(length, 4096 - outLen);
           for (let k = 0; k < copyLen; k++) {
-            out[outLen] = out[outLen - distance];
-            outLen++;
+            out[outLen++] = out[start + (k % distance)];
           }
         }
       }
     } else {
-      if (outLen + 2 <= maxOut) {
-        out[outLen++] = 0x20;
+      out[outLen++] = 0x20;
+      if (outLen < 4096) {
         out[outLen++] = b ^ 0x80;
-      } else {
-        break;
       }
     }
   }
   return out.subarray(0, outLen);
+}
+
+function buildMobiChapters(
+  pdb: { numRecords: number; recordOffsets: number[] },
+  totalRecords: number,
+  fileSize: number,
+  compression: number,
+  firstRecordsText?: string
+): Array<{ index: number; title: string; byteOffset: number; byteLength: number; compression: number }> {
+  const chapters: Array<{ index: number; title: string; byteOffset: number; byteLength: number; compression: number }> = [];
+
+  // 1. Try finding HTML TOC with filepos links in the intro text
+  if (firstRecordsText) {
+    const fileposRegex = /<a\s+[^>]*filepos=["']?0*(\d+)["']?[^>]*>([\s\S]*?)<\/a>/gi;
+    let match;
+    const tocItems: Array<{ pos: number; title: string }> = [];
+    while ((match = fileposRegex.exec(firstRecordsText)) !== null) {
+      const pos = parseInt(match[1], 10);
+      const title = match[2].replace(/<[^>]+>/g, "").trim();
+      if (title && pos > 0 && (!tocItems.length || pos > tocItems[tocItems.length - 1].pos)) {
+        tocItems.push({ pos, title });
+      }
+    }
+
+    if (tocItems.length >= 2) {
+      for (let idx = 0; idx < tocItems.length; idx++) {
+        const item = tocItems[idx];
+        const nextItem = tocItems[idx + 1];
+        const startRec = Math.min(totalRecords, Math.floor(item.pos / 4096) + 1);
+        const endRec = nextItem ? Math.min(totalRecords, Math.floor(nextItem.pos / 4096) + 1) : totalRecords;
+
+        if (startRec >= pdb.recordOffsets.length) break;
+        const byteOffset = pdb.recordOffsets[startRec];
+        const endOffset = (endRec + 1 < pdb.recordOffsets.length) ? pdb.recordOffsets[endRec + 1] : fileSize;
+        const byteLength = Math.max(1, endOffset - byteOffset);
+
+        chapters.push({
+          index: idx,
+          title: item.title,
+          byteOffset,
+          byteLength,
+          compression,
+        });
+      }
+      if (chapters.length > 0) return chapters;
+    }
+  }
+
+  // 2. Group records into natural chapters (8 PalmDOC records = ~32KB text per chapter)
+  const RECORDS_PER_CHAPTER = 8;
+  let chIndex = 0;
+  for (let r = 1; r <= totalRecords; r += RECORDS_PER_CHAPTER) {
+    if (r >= pdb.recordOffsets.length) break;
+    const endR = Math.min(totalRecords, r + RECORDS_PER_CHAPTER - 1);
+    const byteOffset = pdb.recordOffsets[r];
+    const endOffset = (endR + 1 < pdb.recordOffsets.length) ? pdb.recordOffsets[endR + 1] : fileSize;
+    const byteLength = Math.max(1, endOffset - byteOffset);
+
+    chapters.push({
+      index: chIndex,
+      title: `第 ${chIndex + 1} 章`,
+      byteOffset,
+      byteLength,
+      compression,
+    });
+    chIndex++;
+  }
+
+  return chapters;
 }
 
 async function batchInsertMobiChapters(
@@ -4057,24 +4139,37 @@ async function indexMobiBookFromR2(env: Env, userNs: string, fileName: string, r
   const now = Math.floor(Date.now() / 1000);
   const bookId = `mobi_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
+  // Decompress first 3 records to detect TOC
+  let introText = "";
+  try {
+    if (pdb.recordOffsets.length > 1) {
+      const introStart = pdb.recordOffsets[1];
+      const maxIntroRec = Math.min(4, pdb.recordOffsets.length - 1);
+      const introEnd = maxIntroRec + 1 < pdb.recordOffsets.length ? pdb.recordOffsets[maxIntroRec + 1] : fileSize;
+      const introObj = await env.BUCKET.get(r2Key, { range: { offset: introStart, length: introEnd - introStart } });
+      if (introObj) {
+        const introBytes = new Uint8Array(await introObj.arrayBuffer());
+        for (let r = 1; r <= maxIntroRec; r++) {
+          const rStart = pdb.recordOffsets[r] - introStart;
+          const rEnd = (r + 1 < pdb.recordOffsets.length ? pdb.recordOffsets[r + 1] : fileSize) - introStart;
+          if (rEnd > rStart && rEnd <= introBytes.length) {
+            const rawRec = introBytes.subarray(rStart, rEnd);
+            const decomp = mobiHeader.compression === 2 ? decompressPalmDoc(rawRec) : rawRec;
+            introText += decodeMobiBytes(decomp);
+          }
+        }
+      }
+    }
+  } catch {}
+
+  const mobiChapters = buildMobiChapters(pdb, totalChapters, fileSize, mobiHeader.compression || 1, introText);
+  const finalChapterCount = mobiChapters.length;
+
   await env.DB.prepare(
     `INSERT INTO mobi_books (book_id, user_ns, file_name, r2_key, file_size, total_chapters, title, author, compression, status, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, '未知作者', ?, 'ready', ?, ?)`
-  ).bind(bookId, userNs, fileName, r2Key, fileSize, totalChapters, title, mobiHeader.compression || 1, now, now).run();
+  ).bind(bookId, userNs, fileName, r2Key, fileSize, finalChapterCount, title, mobiHeader.compression || 1, now, now).run();
 
-  const mobiChapters: Array<{ index: number; title: string; byteOffset: number; byteLength: number; compression: number }> = [];
-  for (let i = 1; i <= totalChapters; i++) {
-    if (i >= pdb.recordOffsets.length) break;
-    const byteOffset = pdb.recordOffsets[i];
-    const byteLength = i + 1 < pdb.recordOffsets.length ? pdb.recordOffsets[i + 1] - byteOffset : fileSize - byteOffset;
-    mobiChapters.push({
-      index: i - 1,
-      title: `第 ${i} 节`,
-      byteOffset,
-      byteLength,
-      compression: mobiHeader.compression,
-    });
-  }
   await batchInsertMobiChapters(env, bookId, mobiChapters, now);
 
   const bookUrl = `local-mobi:${bookId}`;

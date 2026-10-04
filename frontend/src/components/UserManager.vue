@@ -12,6 +12,7 @@
               <p class="subtitle">管理账号、密码、备份、本地存储与后端 AI 模型权限</p>
             </div>
             <div class="header-actions">
+              <button class="mini-btn danger" @click="handleExitAdmin" title="退出管理模式">退出管理</button>
               <button class="icon-btn" :class="{ spinning: loading }" @click="loadUsers" title="刷新">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
@@ -291,6 +292,13 @@ watch(
 
 function close() {
   emit('update:modelValue', false)
+}
+
+function handleExitAdmin() {
+  appStore.setSecureKey('')
+  appStore.adminAuthorized = false
+  appStore.showToast('已退出管理模式', 'success')
+  close()
 }
 
 function formatTime(value?: number) {
