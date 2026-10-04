@@ -116,6 +116,8 @@ export interface BookGroup {
   groupId: number
   groupName: string
   orderNo?: number
+  show?: boolean
+  hidden?: boolean
 }
 
 // ─── 用户 ───

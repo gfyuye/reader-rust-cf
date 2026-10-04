@@ -108,6 +108,9 @@ export default {
       if (path === "/reader3/searchBookMulti" && request.method === "POST") {
         return handleSearchBookMulti(request, env);
       }
+      if (path === "/reader3/testBookSources" && request.method === "POST") {
+        return handleTestBookSources(request, env);
+      }
 
       // 3. Bookshelf & Reading Progress (书架与进度 - D1)
       if ((path === "/reader3/getBookshelf" || path === "/reader3/getShelfBookWithCacheInfo") && request.method === "GET") {
@@ -158,6 +161,15 @@ export default {
       if (path === "/reader3/getBookGroups") return handleGetDocument(request, env, "bookGroup.json");
       if (path === "/reader3/saveBookGroup" && request.method === "POST") return handleSaveDocumentItem(request, env, "bookGroup.json", ctx);
       if (path === "/reader3/deleteBookGroup" && request.method === "POST") return handleDeleteDocumentItem(request, env, "bookGroup.json", ctx);
+
+      // RSS Sources & Articles
+      if (path === "/reader3/getRssSources") return handleGetDocument(request, env, "rssSource.json");
+      if (path === "/reader3/saveRssSource" && request.method === "POST") return handleSaveDocumentItem(request, env, "rssSource.json", ctx);
+      if (path === "/reader3/saveRssSources" && request.method === "POST") return handleSaveDocumentItems(request, env, "rssSource.json", ctx);
+      if (path === "/reader3/deleteRssSource" && request.method === "POST") return handleDeleteDocumentItem(request, env, "rssSource.json", ctx);
+      if (path === "/reader3/deleteRssSources" && request.method === "POST") return handleDeleteDocumentItems(request, env, "rssSource.json", ctx);
+      if (path === "/reader3/getRssArticles") return handleGetRssArticles(request, env);
+      if (path === "/reader3/getRssContent") return handleGetRssContent(request, env);
 
       // 6. EPUB Streaming & Indexing
       if ((path === "/reader3/epub/upload" || path === "/reader3/uploadEpubBook") && request.method === "POST") return handleEpubUpload(request, env);
@@ -946,6 +958,198 @@ async function handleDeleteDocumentItem(request: Request, env: Env, name: string
   await saveDocument(env, userNs, name, list);
   triggerOnChangeSync(env, userNs, ctx);
   return jsonResponse({ isSuccess: true, data: "删除成功" });
+}
+
+async function handleSaveDocumentItems(request: Request, env: Env, name: string, ctx: ExecutionContext): Promise<Response> {
+  const userNs = await resolveUserNs(request, env);
+  if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
+
+  const items = await request.json<any[]>();
+  if (!Array.isArray(items)) return jsonResponse({ isSuccess: false, errorMsg: "数据格式错误" });
+
+  let list: any[] = (await getDocument(env, userNs, name)) || [];
+
+  for (const item of items) {
+    const idKey = item.sourceUrl !== undefined ? "sourceUrl" : item.id !== undefined ? "id" : item.key !== undefined ? "key" : item.url !== undefined ? "url" : null;
+    if (idKey) {
+      const idx = list.findIndex((i: any) => i[idKey] === item[idKey]);
+      if (idx >= 0) {
+        list[idx] = { ...list[idx], ...item };
+      } else {
+        list.push(item);
+      }
+    } else {
+      list.push(item);
+    }
+  }
+
+  await saveDocument(env, userNs, name, list);
+  triggerOnChangeSync(env, userNs, ctx);
+  return jsonResponse({ isSuccess: true, data: `成功保存 ${items.length} 条记录` });
+}
+
+async function handleDeleteDocumentItems(request: Request, env: Env, name: string, ctx: ExecutionContext): Promise<Response> {
+  const userNs = await resolveUserNs(request, env);
+  if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
+
+  const items = await request.json<any[]>();
+  let list: any[] = (await getDocument(env, userNs, name)) || [];
+
+  if (Array.isArray(items)) {
+    const toDeleteKeys = new Set(items.map((i: any) => i.sourceUrl || i.id || i.key || JSON.stringify(i)));
+    list = list.filter((i: any) => !toDeleteKeys.has(i.sourceUrl || i.id || i.key || JSON.stringify(i)));
+  }
+
+  await saveDocument(env, userNs, name, list);
+  triggerOnChangeSync(env, userNs, ctx);
+  return jsonResponse({ isSuccess: true, data: "删除成功" });
+}
+
+async function handleGetRssArticles(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const sourceUrl = url.searchParams.get("sourceUrl") || "";
+  if (!sourceUrl) return jsonResponse({ isSuccess: false, errorMsg: "缺少 sourceUrl" });
+
+  try {
+    const resp = await fetch(sourceUrl, {
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+      signal: AbortSignal.timeout(10000),
+    });
+    const xml = await resp.text();
+
+    const articles: any[] = [];
+    const itemRegex = /<(?:item|entry)[\s>]([\s\S]*?)<\/(?:item|entry)>/gi;
+    let match;
+    while ((match = itemRegex.exec(xml)) !== null) {
+      const itemXml = match[1];
+      const titleMatch = itemXml.match(/<title[^>]*>(?:<!\[CDATA\[([\s\S]*?)\]\]>|([\s\S]*?))<\/title>/i);
+      const linkMatch = itemXml.match(/<link[^>]*>(?:<!\[CDATA\[([\s\S]*?)\]\]>|([\s\S]*?))<\/link>/i) || itemXml.match(/<link[^>]*href=["']([^"']+)["']/i);
+      const pubDateMatch = itemXml.match(/<(?:pubDate|updated|published)[^>]*>([\s\S]*?)<\/(?:pubDate|updated|published)>/i);
+
+      const title = (titleMatch?.[1] || titleMatch?.[2] || "无标题").trim();
+      const link = (linkMatch?.[1] || linkMatch?.[2] || linkMatch?.[0] || "").trim();
+      const pubDate = pubDateMatch?.[1]?.trim() || "";
+
+      if (title || link) {
+        articles.push({
+          title,
+          link,
+          pubDate,
+          origin: sourceUrl,
+        });
+      }
+    }
+
+    return jsonResponse({ isSuccess: true, data: articles });
+  } catch (err: any) {
+    return jsonResponse({ isSuccess: false, errorMsg: err.message || "获取 RSS 文章失败" });
+  }
+}
+
+async function handleGetRssContent(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const link = url.searchParams.get("url") || "";
+  if (!link) return jsonResponse({ isSuccess: false, errorMsg: "缺少 url" });
+
+  try {
+    const resp = await fetch(link, {
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+      signal: AbortSignal.timeout(10000),
+    });
+    const html = await resp.text();
+    return jsonResponse({ isSuccess: true, data: html });
+  } catch (err: any) {
+    return jsonResponse({ isSuccess: false, errorMsg: err.message || "获取内容失败" });
+  }
+}
+
+async function handleTestBookSources(request: Request, env: Env): Promise<Response> {
+  const userNs = await resolveUserNs(request, env);
+  if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
+
+  const body = await request.json<any>().catch(() => ({}));
+  const urls: string[] = body.bookSourceUrls || [];
+  const keyword = body.keyword || "我的";
+
+  const rows = await env.DB.prepare(
+    `SELECT book_source_url, book_source_name, json FROM book_sources WHERE user_ns = ?1`
+  ).bind(userNs).all<{ book_source_url: string; book_source_name: string; json: string }>();
+
+  let allSources = (rows.results || []).map((r) => {
+    try {
+      return { ...JSON.parse(r.json), bookSourceUrl: r.book_source_url, bookSourceName: r.book_source_name };
+    } catch {
+      return { bookSourceUrl: r.book_source_url, bookSourceName: r.book_source_name };
+    }
+  });
+
+  if (urls.length > 0) {
+    allSources = allSources.filter((s) => urls.includes(s.bookSourceUrl));
+  }
+
+  const toTest = allSources.slice(0, 10);
+  const startTime = Date.now();
+  const results = [];
+
+  for (const s of toTest) {
+    const t0 = Date.now();
+    try {
+      if (s.searchUrl) {
+        let testUrl = s.searchUrl;
+        if (testUrl.includes("{{key}}")) testUrl = testUrl.replace(/\{\{key\}\}/g, encodeURIComponent(keyword));
+        else if (testUrl.includes("${key}")) testUrl = testUrl.replace(/\$\{key\}/g, encodeURIComponent(keyword));
+        else testUrl = testUrl.split("@")[0].split(";")[0].split(",")[0];
+
+        if (testUrl.startsWith("http")) {
+          const resp = await fetch(testUrl, {
+            headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+            signal: AbortSignal.timeout(5000),
+          });
+          results.push({
+            bookSourceUrl: s.bookSourceUrl,
+            bookSourceName: s.bookSourceName,
+            status: resp.ok ? "success" : "failed",
+            durationMs: Date.now() - t0,
+            searchCount: resp.ok ? 1 : 0,
+            error: resp.ok ? undefined : `HTTP ${resp.status}`,
+          });
+          continue;
+        }
+      }
+
+      results.push({
+        bookSourceUrl: s.bookSourceUrl,
+        bookSourceName: s.bookSourceName,
+        status: "success",
+        durationMs: Date.now() - t0,
+        searchCount: 1,
+      });
+    } catch (err: any) {
+      results.push({
+        bookSourceUrl: s.bookSourceUrl,
+        bookSourceName: s.bookSourceName,
+        status: "failed",
+        durationMs: Date.now() - t0,
+        error: err.message || "请求失败",
+      });
+    }
+  }
+
+  const successCount = results.filter((r) => r.status === "success").length;
+  const summary = {
+    total: results.length,
+    success: successCount,
+    failed: results.length - successCount,
+    durationMs: Date.now() - startTime,
+  };
+
+  return jsonResponse({
+    isSuccess: true,
+    data: {
+      summary,
+      results,
+    },
+  });
 }
 
 // ==========================================

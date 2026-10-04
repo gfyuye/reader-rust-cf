@@ -23,6 +23,14 @@
               <div v-for="group in shelfStore.groups" :key="group.groupId" class="group-item">
                 <input v-model.trim="editingNames[group.groupId]" class="group-input" />
                 <div class="group-actions">
+                  <button
+                    class="mini-btn"
+                    :class="{ active: !group.hidden }"
+                    :title="group.hidden ? '当前已隐藏，点击在书架显示' : '当前已显示，点击在书架隐藏'"
+                    @click="shelfStore.toggleGroupVisibility(group.groupId)"
+                  >
+                    {{ group.hidden ? '已隐藏' : '显示中' }}
+                  </button>
                   <button class="mini-btn" @click="renameGroup(group.groupId)">保存</button>
                   <button class="mini-btn danger" @click="deleteGroup(group.groupId, group.groupName)">删除</button>
                 </div>

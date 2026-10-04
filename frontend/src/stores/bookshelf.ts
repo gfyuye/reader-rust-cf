@@ -137,7 +137,8 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   const displayGroups = computed(() => {
     const all: BookGroup = { groupId: -1, groupName: '全部' }
     const ungrouped: BookGroup = { groupId: 0, groupName: '未分组' }
-    return [all, ...groups.value, ungrouped]
+    const visibleGroups = groups.value.filter((g) => !g.hidden && g.show !== false)
+    return [all, ...visibleGroups, ungrouped]
   })
 
   const filteredBooks = computed(() => {
@@ -152,13 +153,18 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
 
   async function fetchGroups() {
     try {
-      groups.value = await getBookGroups()
+      const raw = await getBookGroups()
+      // Filter out system groups that are already provided by displayGroups
+      groups.value = (raw || []).filter(
+        (g) => g && g.groupId !== -1 && g.groupId !== 0 && g.groupName !== '全部' && g.groupName !== '未分组'
+      )
     } catch {
       groups.value = []
     }
   }
 
   async function saveGroup(groupName: string, groupId = 0) {
+    let existingGroup = groups.value.find((g) => g.groupId === groupId)
     if (groupId <= 0) {
       const existingIds = groups.value.map((g) => g.groupId).filter((id) => id > 0)
       let nextId = 1
@@ -170,10 +176,21 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     await apiSaveBookGroup({
       groupId,
       groupName,
-      orderNo: groups.value.length,
+      orderNo: existingGroup?.orderNo ?? groups.value.length,
+      hidden: existingGroup?.hidden,
+      show: existingGroup?.show,
     })
     await fetchGroups()
     return groups.value.find((group) => group.groupId === groupId)?.groupId || groupId
+  }
+
+  async function toggleGroupVisibility(groupId: number) {
+    const target = groups.value.find((g) => g.groupId === groupId)
+    if (!target) return
+    target.hidden = !target.hidden
+    if (target.hidden) target.show = false
+    else target.show = true
+    await apiSaveBookGroup(target)
   }
 
   async function removeGroup(groupId: number) {
@@ -316,7 +333,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     fetchBooks, refreshBooks, removeBook,
     refreshRecentBooks, removeRecentBook, clearAllRecentBooks,
     groups, activeGroupId, displayGroups, filteredBooks,
-    fetchGroups, saveGroup, removeGroup,
+    fetchGroups, saveGroup, removeGroup, toggleGroupVisibility,
     searchResults, isSearching, searchKey,
     searchScope, searchGroup, searchSourceUrl, startSearch, clearSearch, isSearchMode,
     editMode,
