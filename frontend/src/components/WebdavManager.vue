@@ -499,7 +499,7 @@ async function importToShelf(entry: EntryRow) {
   })
 
   if (isDuplicate) {
-    appStore.showToast(`文件已存在，该书籍已在书架中：《${cleanName}》`, 'warning')
+    appStore.showToast(`书籍已存在：《${cleanName}》`, 'warning')
     return
   }
 

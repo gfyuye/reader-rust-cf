@@ -664,30 +664,82 @@ async function handleSaveBooks(request: Request, env: Env, ctx: ExecutionContext
 }
 
 async function handleDeleteBook(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  const userNs = await resolveUserNs(request, env);
-  if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
+  try {
+    const userNs = await resolveUserNs(request, env);
+    if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
-  const { bookUrl } = await request.json<any>();
-  let shelf: any[] = (await getDocument(env, userNs, "bookshelf.json")) || [];
-  shelf = shelf.filter((b) => b.bookUrl !== bookUrl);
+    const body = await request.json<any>().catch(() => ({}));
+    const bookUrl = body.bookUrl || body.url || "";
+    const name = body.name || "";
 
-  await saveDocument(env, userNs, "bookshelf.json", shelf);
-  triggerOnChangeSync(env, userNs, ctx);
-  return jsonResponse({ isSuccess: true, data: "书籍已移出书架" });
+    let shelf: any[] = (await getDocument(env, userNs, "bookshelf.json")) || [];
+    shelf = shelf.filter((b) => {
+      if (bookUrl && (b.bookUrl === bookUrl || b.url === bookUrl)) return false;
+      if (!bookUrl && name && b.name === name) return false;
+      return true;
+    });
+
+    await saveDocument(env, userNs, "bookshelf.json", shelf);
+
+    if (bookUrl.startsWith("local-epub:")) {
+      const bookId = bookUrl.split(":")[1]?.split("#")[0];
+      if (bookId) {
+        ctx.waitUntil(Promise.allSettled([
+          env.DB.prepare(`DELETE FROM epub_chapters WHERE book_id = ?1`).bind(bookId).run(),
+          env.DB.prepare(`DELETE FROM epub_books WHERE book_id = ?1`).bind(bookId).run(),
+        ]));
+      }
+    } else if (bookUrl.startsWith("local-txt:")) {
+      const bookId = bookUrl.split(":")[1]?.split("#")[0];
+      if (bookId) {
+        ctx.waitUntil(Promise.allSettled([
+          env.DB.prepare(`DELETE FROM txt_chapters WHERE book_id = ?1`).bind(bookId).run(),
+          env.DB.prepare(`DELETE FROM txt_books WHERE book_id = ?1`).bind(bookId).run(),
+        ]));
+      }
+    } else if (bookUrl.startsWith("local-mobi:")) {
+      const bookId = bookUrl.split(":")[1]?.split("#")[0];
+      if (bookId) {
+        ctx.waitUntil(Promise.allSettled([
+          env.DB.prepare(`DELETE FROM mobi_chapters WHERE book_id = ?1`).bind(bookId).run(),
+          env.DB.prepare(`DELETE FROM mobi_books WHERE book_id = ?1`).bind(bookId).run(),
+        ]));
+      }
+    } else if (bookUrl.startsWith("local-pdf:")) {
+      const bookId = bookUrl.split(":")[1]?.split("#")[0];
+      if (bookId) {
+        ctx.waitUntil(Promise.allSettled([
+          env.DB.prepare(`DELETE FROM pdf_outlines WHERE book_id = ?1`).bind(bookId).run(),
+          env.DB.prepare(`DELETE FROM pdf_books WHERE book_id = ?1`).bind(bookId).run(),
+        ]));
+      }
+    }
+
+    triggerOnChangeSync(env, userNs, ctx);
+    return jsonResponse({ isSuccess: true, data: "书籍已移出书架" });
+  } catch (err: any) {
+    console.error("handleDeleteBook error:", err);
+    return jsonResponse({ isSuccess: false, errorMsg: err.message || "删除书籍失败" });
+  }
 }
 
 async function handleDeleteBooks(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  const userNs = await resolveUserNs(request, env);
-  if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
+  try {
+    const userNs = await resolveUserNs(request, env);
+    if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
-  const list = await request.json<any[]>();
-  const deleteUrls = new Set(list.map((b) => (typeof b === "string" ? b : b.bookUrl)));
-  let shelf: any[] = (await getDocument(env, userNs, "bookshelf.json")) || [];
-  shelf = shelf.filter((b) => !deleteUrls.has(b.bookUrl));
+    const list = await request.json<any[]>().catch(() => []);
+    const deleteUrls = new Set(list.map((b) => (typeof b === "string" ? b : b.bookUrl || b.url)));
+    let shelf: any[] = (await getDocument(env, userNs, "bookshelf.json")) || [];
+    shelf = shelf.filter((b) => !deleteUrls.has(b.bookUrl) && !deleteUrls.has(b.url));
 
-  await saveDocument(env, userNs, "bookshelf.json", shelf);
-  triggerOnChangeSync(env, userNs, ctx);
-  return jsonResponse({ isSuccess: true, data: "批量删除成功" });
+    await saveDocument(env, userNs, "bookshelf.json", shelf);
+    triggerOnChangeSync(env, userNs, ctx);
+    return jsonResponse({ isSuccess: true, data: "批量删除成功" });
+  } catch (err: any) {
+    console.error("handleDeleteBooks error:", err);
+    return jsonResponse({ isSuccess: false, errorMsg: err.message || "批量删除失败" });
+  }
 }
 
 async function handleSaveBookProgress(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -3780,6 +3832,16 @@ async function handleImportWebdavBook(request: Request, env: Env, ctx: Execution
 
     const { path: relPath, name } = await request.json<any>();
     if (!name) return jsonResponse({ isSuccess: false, errorMsg: "缺少文件名" });
+
+    // Check if book already exists on bookshelf
+    const titleWithoutExt = name.replace(/\.[^/.]+$/, "").trim();
+    let shelf: any[] = (await getDocument(env, userNs, "bookshelf.json")) || [];
+    const existing = shelf.find(
+      (b) => b.name === name || b.name === titleWithoutExt || (b.bookUrl && b.bookUrl.toLowerCase().endsWith("/" + name.toLowerCase()))
+    );
+    if (existing) {
+      return jsonResponse({ isSuccess: false, errorMsg: `书籍已存在：《${name}》` });
+    }
 
     const cleanRel = (relPath || "").replace(/^\/+/, "");
     const sourceKey = `webdav/${userNs}/${cleanRel}`;

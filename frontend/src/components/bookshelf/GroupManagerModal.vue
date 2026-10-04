@@ -20,7 +20,28 @@
             </div>
 
             <div class="group-list">
-              <div v-for="group in shelfStore.groups" :key="group.groupId" class="group-item">
+              <div
+                v-for="(group, idx) in shelfStore.groups"
+                :key="group.groupId"
+                class="group-item"
+                :class="{ 'is-dragging': draggedIndex === idx, 'drag-over': dragOverIndex === idx }"
+                draggable="true"
+                @dragstart="handleDragStart(idx, $event)"
+                @dragover.prevent="handleDragOver(idx)"
+                @dragleave="handleDragLeave(idx)"
+                @drop="handleDrop(idx)"
+                @dragend="handleDragEnd"
+              >
+                <div class="drag-handle" title="按住拖拽调整分组顺序">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                    <circle cx="9" cy="5" r="1.5" fill="currentColor" />
+                    <circle cx="9" cy="12" r="1.5" fill="currentColor" />
+                    <circle cx="9" cy="19" r="1.5" fill="currentColor" />
+                    <circle cx="15" cy="5" r="1.5" fill="currentColor" />
+                    <circle cx="15" cy="12" r="1.5" fill="currentColor" />
+                    <circle cx="15" cy="19" r="1.5" fill="currentColor" />
+                  </svg>
+                </div>
                 <input v-model.trim="editingNames[group.groupId]" class="group-input" />
                 <div class="group-actions">
                   <button
@@ -98,6 +119,43 @@ async function deleteGroup(groupId: number, groupName: string) {
     appStore.showToast((e as Error).message || '删除分组失败', 'error')
   }
 }
+
+const draggedIndex = ref<number | null>(null)
+const dragOverIndex = ref<number | null>(null)
+
+function handleDragStart(index: number, event: DragEvent) {
+  draggedIndex.value = index
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', String(index))
+  }
+}
+
+function handleDragOver(index: number) {
+  if (draggedIndex.value === null || draggedIndex.value === index) return
+  dragOverIndex.value = index
+}
+
+function handleDragLeave(index: number) {
+  if (dragOverIndex.value === index) {
+    dragOverIndex.value = null
+  }
+}
+
+async function handleDrop(targetIndex: number) {
+  if (draggedIndex.value === null || draggedIndex.value === targetIndex) return
+  const fromIndex = draggedIndex.value
+  draggedIndex.value = null
+  dragOverIndex.value = null
+
+  await shelfStore.reorderGroups(fromIndex, targetIndex)
+  appStore.showToast('分组顺序已更新', 'success')
+}
+
+function handleDragEnd() {
+  draggedIndex.value = null
+  dragOverIndex.value = null
+}
 </script>
 
 <style scoped>
@@ -174,6 +232,28 @@ async function deleteGroup(groupId: number, groupName: string) {
 .group-item {
   display: flex;
   gap: 10px;
+  align-items: center;
+}
+
+.drag-handle {
+  cursor: grab;
+  color: var(--color-text-tertiary);
+  display: flex;
+  align-items: center;
+  padding: 0 4px;
+  user-select: none;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+.group-item.is-dragging {
+  opacity: 0.4;
+}
+
+.group-item.drag-over {
+  border-top: 2px solid var(--color-primary);
 }
 
 .group-list {

@@ -204,6 +204,22 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     })
   }
 
+  async function reorderGroups(fromIndex: number, toIndex: number) {
+    if (fromIndex < 0 || fromIndex >= groups.value.length || toIndex < 0 || toIndex >= groups.value.length) return
+    const list = groups.value.slice()
+    const [moved] = list.splice(fromIndex, 1)
+    list.splice(toIndex, 0, moved)
+
+    list.forEach((g, index) => {
+      g.orderNo = index
+    })
+    groups.value = list
+
+    for (const g of list) {
+      await apiSaveBookGroup(g).catch(() => undefined)
+    }
+  }
+
   // ─── Search ───
   const searchResults = ref<SearchBook[]>([])
   const isSearching = ref(false)
@@ -333,7 +349,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     fetchBooks, refreshBooks, removeBook,
     refreshRecentBooks, removeRecentBook, clearAllRecentBooks,
     groups, activeGroupId, displayGroups, filteredBooks,
-    fetchGroups, saveGroup, removeGroup, toggleGroupVisibility,
+    fetchGroups, saveGroup, removeGroup, toggleGroupVisibility, reorderGroups,
     searchResults, isSearching, searchKey,
     searchScope, searchGroup, searchSourceUrl, startSearch, clearSearch, isSearchMode,
     editMode,
