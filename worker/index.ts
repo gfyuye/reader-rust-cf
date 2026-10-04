@@ -3675,7 +3675,6 @@ async function handleImportWebdavBook(request: Request, env: Env, ctx: Execution
     return jsonResponse({ isSuccess: false, errorMsg: err.message || "导入 WebDAV 书籍失败" });
   }
 }
-}
 
 async function indexTxtBookFromR2(env: Env, userNs: string, fileName: string, r2Key: string, fileSize: number) {
   const obj = await env.BUCKET.get(r2Key);
