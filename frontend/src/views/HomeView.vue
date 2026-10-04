@@ -30,60 +30,19 @@
               </svg>
               <span class="shelf-btn-label">取消全选</span>
             </button>
+            <button
+              class="shelf-btn"
+              type="button"
+              title="完成"
+              aria-label="完成"
+              @click="toggleEditMode"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M20 6 9 17l-5-5" />
+              </svg>
+              <span class="shelf-btn-label">完成</span>
+            </button>
           </template>
-          <button class="shelf-btn" type="button" title="导入本地书" aria-label="导入本地书" @click="triggerLocalBookUpload" :disabled="localBookUploading">
-            <svg v-if="!localBookUploading" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 3v12" />
-              <path d="m7 8 5-5 5 5" />
-              <path d="M5 21h14" />
-            </svg>
-            <svg v-else class="spinning" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 12a9 9 0 0 0-15.55-6.2L3 8" />
-              <path d="M3 3v5h5" />
-            </svg>
-            <span class="shelf-btn-label">{{ localBookUploading ? '导入中' : '导入本地书' }}</span>
-          </button>
-          <button class="shelf-btn" type="button" title="刷新书架" aria-label="刷新书架" @click="handleRefreshBooks" :disabled="shelfStore.refreshing">
-            <svg :class="{ spinning: shelfStore.refreshing }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 12a9 9 0 0 0-15.55-6.2L3 8" />
-              <path d="M3 3v5h5" />
-              <path d="M3 12a9 9 0 0 0 15.55 6.2L21 16" />
-              <path d="M21 21v-5h-5" />
-            </svg>
-            <span class="shelf-btn-label">{{ shelfStore.refreshing ? '刷新中' : '刷新书架' }}</span>
-          </button>
-          <button class="shelf-btn" type="button" title="分组管理" aria-label="分组管理" @click="showGroupManager = true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M4 7h6l2 2h8v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2Z" />
-              <path d="M8 13h8" />
-            </svg>
-            <span class="shelf-btn-label">分组管理</span>
-          </button>
-          <button class="shelf-btn" type="button" title="缓存管理" aria-label="缓存管理" @click="showCacheManager = true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <ellipse cx="12" cy="5" rx="8" ry="3" />
-              <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
-              <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
-            </svg>
-            <span class="shelf-btn-label">缓存管理</span>
-          </button>
-          <button
-            class="shelf-btn"
-            type="button"
-            :class="{ active: shelfStore.editMode }"
-            :title="shelfStore.editMode ? '完成' : '编辑'"
-            :aria-label="shelfStore.editMode ? '完成' : '编辑'"
-            @click="toggleEditMode"
-          >
-            <svg v-if="shelfStore.editMode" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M20 6 9 17l-5-5" />
-            </svg>
-            <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 20h9" />
-              <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
-            </svg>
-            <span class="shelf-btn-label">{{ shelfStore.editMode ? '完成' : '编辑' }}</span>
-          </button>
         </div>
       </div>
 
@@ -170,14 +129,14 @@
       v-model="showGroupSelect"
       @select="handleSetGroup"
     />
-    <GroupManagerModal v-model="showGroupManager" />
+    <GroupManagerModal v-model="appStore.showGroupManager" />
 
-    <CacheLibraryModal v-model="showCacheManager" />
+    <CacheLibraryModal v-model="appStore.showCacheManager" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useBookshelfStore } from '../stores/bookshelf'
 import { useReaderStore } from '../stores/reader'
@@ -199,14 +158,16 @@ const appStore = useAppStore()
 
 const showDetail = ref(false)
 const showGroupSelect = ref(false)
-const showGroupManager = ref(false)
-const showCacheManager = ref(false)
 const selectedBook = ref<Book | SearchBook | null>(null)
 const openingBookUrl = ref('')
 const localBookFileInputRef = ref<HTMLInputElement | null>(null)
 const localBookUploading = ref(false)
 const uploadingFileName = ref('')
 const localBookProgress = ref<number | null>(null)
+
+watch(() => appStore.triggerImportLocalBookEvent, () => {
+  triggerLocalBookUpload()
+})
 
 onMounted(async () => {
   await appStore.fetchUserInfo()
@@ -369,14 +330,6 @@ async function handleReorderBooks(payload: { draggedUrl: string; targetUrl: stri
     await shelfStore.reorderBooks(payload.draggedUrl, payload.targetUrl)
   } catch (e: any) {
     appStore.showToast(e.message || '排序失败', 'error')
-  }
-}
-
-async function handleRefreshBooks() {
-  try {
-    await shelfStore.refreshBooks()
-  } catch (e: any) {
-    appStore.showToast(e.message || '刷新书架失败', 'error')
   }
 }
 </script>

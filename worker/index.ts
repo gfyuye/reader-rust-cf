@@ -889,7 +889,39 @@ async function handleSaveDocumentItem(request: Request, env: Env, name: string, 
 
   const item = await request.json<any>();
   let list: any[] = (await getDocument(env, userNs, name)) || [];
-  list.unshift(item);
+
+  if (name === "bookGroup.json") {
+    const existingIds = list.map((g: any) => Number(g.groupId || 0)).filter((id: number) => id > 0);
+    if (!item.groupId || item.groupId <= 0) {
+      let nextId = 1;
+      while (existingIds.includes(nextId)) {
+        nextId = nextId < (1 << 30) ? nextId * 2 : nextId + 1;
+      }
+      item.groupId = nextId;
+    }
+    const idx = list.findIndex((g: any) => g.groupId === item.groupId);
+    if (idx >= 0) {
+      list[idx] = { ...list[idx], ...item };
+    } else {
+      list.push(item);
+    }
+    await saveDocument(env, userNs, name, list);
+    triggerOnChangeSync(env, userNs, ctx);
+    return jsonResponse({ isSuccess: true, data: item });
+  }
+
+  const idKey = item.id !== undefined ? "id" : item.key !== undefined ? "key" : item.url !== undefined ? "url" : null;
+  if (idKey) {
+    const idx = list.findIndex((i: any) => i[idKey] === item[idKey]);
+    if (idx >= 0) {
+      list[idx] = { ...list[idx], ...item };
+    } else {
+      list.unshift(item);
+    }
+  } else {
+    list.unshift(item);
+  }
+
   await saveDocument(env, userNs, name, list);
   triggerOnChangeSync(env, userNs, ctx);
   return jsonResponse({ isSuccess: true, data: "保存成功" });
@@ -901,6 +933,15 @@ async function handleDeleteDocumentItem(request: Request, env: Env, name: string
 
   const item = await request.json<any>();
   let list: any[] = (await getDocument(env, userNs, name)) || [];
+
+  if (name === "bookGroup.json") {
+    const targetId = item.groupId ?? item.id;
+    list = list.filter((g: any) => g.groupId !== targetId && g.id !== targetId);
+    await saveDocument(env, userNs, name, list);
+    triggerOnChangeSync(env, userNs, ctx);
+    return jsonResponse({ isSuccess: true, data: "删除成功" });
+  }
+
   list = list.filter((i) => JSON.stringify(i) !== JSON.stringify(item));
   await saveDocument(env, userNs, name, list);
   triggerOnChangeSync(env, userNs, ctx);
@@ -1585,17 +1626,22 @@ async function readMobiChapterText(bookId: string, chapterIndex: number, env: En
   if (!payload) throw new Error("无法读取切片数据 (R2 与远端 WebDAV 均未命中)");
 
   const decompressed = chapter.compression === 2 ? decompressPalmDoc(payload) : payload;
-  let text = "";
+  return decodeMobiBytes(decompressed);
+}
+
+function decodeMobiBytes(bytes: Uint8Array): string {
+  const utf8 = new TextDecoder("utf-8").decode(bytes);
+  const utf8Chinese = (utf8.match(/[\u4e00-\u9fa5]/g) || []).length;
+
   try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(decompressed);
-  } catch {
-    try {
-      text = new TextDecoder("gb18030").decode(decompressed);
-    } catch {
-      text = new TextDecoder().decode(decompressed);
+    const gbk = new TextDecoder("gb18030").decode(bytes);
+    const gbkChinese = (gbk.match(/[\u4e00-\u9fa5]/g) || []).length;
+    if (gbkChinese > 20 && gbkChinese > utf8Chinese * 3) {
+      return gbk;
     }
-  }
-  return text;
+  } catch {}
+
+  return utf8;
 }
 
 async function handleMobiInfo(bookId: string, env: Env): Promise<Response> {

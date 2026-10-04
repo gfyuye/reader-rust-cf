@@ -256,17 +256,47 @@
                 <rect width="7" height="7" x="3" y="14" rx="1" />
                 <rect width="7" height="7" x="14" y="14" rx="1" />
               </svg>
-              &#20070;&#26550;&#35774;&#32622;
+              书架设置
             </h3>
-            <div class="btn-group">
-              <button class="action-btn" @click="refreshCache">
+            <div class="settings-action-grid">
+              <button class="action-btn" @click="handleTriggerImportLocalBook">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                  <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                  <path d="M3 3v5h5" />
-                  <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
-                  <path d="M16 16h5v5" />
+                  <path d="M12 3v12" />
+                  <path d="m7 8 5-5 5 5" />
+                  <path d="M5 21h14" />
                 </svg>
-                &#21047;&#26032;&#32531;&#23384;
+                导入本地书
+              </button>
+              <button class="action-btn" :disabled="shelfStore.refreshing" @click="handleRefreshBooks">
+                <svg :class="{ spinning: shelfStore.refreshing }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                  <path d="M21 12a9 9 0 0 0-15.55-6.2L3 8" />
+                  <path d="M3 3v5h5" />
+                  <path d="M3 12a9 9 0 0 0 15.55 6.2L21 16" />
+                  <path d="M21 21v-5h-5" />
+                </svg>
+                {{ shelfStore.refreshing ? '正在刷新...' : '刷新书架' }}
+              </button>
+              <button class="action-btn" @click="handleOpenGroupManager">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                  <path d="M4 7h6l2 2h8v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2Z" />
+                  <path d="M8 13h8" />
+                </svg>
+                分组管理
+              </button>
+              <button class="action-btn" @click="handleOpenCacheManager">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                  <ellipse cx="12" cy="5" rx="8" ry="3" />
+                  <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
+                  <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
+                </svg>
+                缓存管理
+              </button>
+              <button class="action-btn" :class="{ active: shelfStore.editMode }" @click="handleToggleEditMode">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                  <path d="M12 20h9" />
+                  <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                </svg>
+                {{ shelfStore.editMode ? '退出编辑模式' : '编辑书架' }}
               </button>
             </div>
           </section>
@@ -505,6 +535,30 @@ function openWebdavManager() {
   appStore.showWebdavManager = true
 }
 
+function handleTriggerImportLocalBook() {
+  close()
+  appStore.triggerImportLocalBook()
+}
+
+function handleRefreshBooks() {
+  void shelfStore.refreshBooks()
+}
+
+function handleOpenGroupManager() {
+  close()
+  appStore.showGroupManager = true
+}
+
+function handleOpenCacheManager() {
+  close()
+  appStore.showCacheManager = true
+}
+
+function handleToggleEditMode() {
+  close()
+  shelfStore.editMode = !shelfStore.editMode
+}
+
 const showAiSettingsDrawer = ref(false)
 
 function openAiSettingsDrawer() {
@@ -517,12 +571,6 @@ const showRemoteWebdavModal = ref(false)
 function openRemoteWebdavModal() {
   close()
   showRemoteWebdavModal.value = true
-}
-
-function refreshCache() {
-  shelfStore.fetchBooks()
-  appStore.showToast('\u4e66\u67b6\u5df2\u5237\u65b0', 'success')
-  close()
 }
 
 function setTheme(t: 'light' | 'dark') {
@@ -854,6 +902,12 @@ async function handleCheckVersionUpdate() {
 }
 
 .stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.settings-action-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-2);

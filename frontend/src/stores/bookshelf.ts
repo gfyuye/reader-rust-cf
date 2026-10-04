@@ -159,13 +159,21 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   }
 
   async function saveGroup(groupName: string, groupId = 0) {
+    if (groupId <= 0) {
+      const existingIds = groups.value.map((g) => g.groupId).filter((id) => id > 0)
+      let nextId = 1
+      while (existingIds.includes(nextId)) {
+        nextId = nextId < (1 << 30) ? nextId * 2 : nextId + 1
+      }
+      groupId = nextId
+    }
     await apiSaveBookGroup({
       groupId,
       groupName,
       orderNo: groups.value.length,
     })
     await fetchGroups()
-    return groups.value.find((group) => group.groupName === groupName)?.groupId || groupId
+    return groups.value.find((group) => group.groupId === groupId)?.groupId || groupId
   }
 
   async function removeGroup(groupId: number) {

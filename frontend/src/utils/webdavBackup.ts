@@ -253,27 +253,47 @@ export async function restoreWebdavBackup(payload: WebdavBackupPayload) {
     await saveBookGroup(group).catch(() => undefined)
   }
   if (payload.bookshelf.books.length) {
-    await saveBooks(payload.bookshelf.books).catch(() => undefined)
+    const BOOK_CHUNK = 50
+    for (let i = 0; i < payload.bookshelf.books.length; i += BOOK_CHUNK) {
+      await saveBooks(payload.bookshelf.books.slice(i, i + BOOK_CHUNK)).catch((err) => {
+        console.warn('saveBooks batch error:', err)
+      })
+    }
   }
 
-  // 2. Restore bookmarks & replace rules
+  // 2. Restore bookmarks & replace rules in batches
   if (payload.bookmarks.length) {
-    await saveBookmarks(payload.bookmarks).catch(() => undefined)
+    const BM_CHUNK = 50
+    for (let i = 0; i < payload.bookmarks.length; i += BM_CHUNK) {
+      await saveBookmarks(payload.bookmarks.slice(i, i + BM_CHUNK)).catch((err) => {
+        console.warn('saveBookmarks batch error:', err)
+      })
+    }
   }
   if (payload.replaceRules.length) {
-    await saveReplaceRules(payload.replaceRules).catch(() => undefined)
+    const RULE_CHUNK = 50
+    for (let i = 0; i < payload.replaceRules.length; i += RULE_CHUNK) {
+      await saveReplaceRules(payload.replaceRules.slice(i, i + RULE_CHUNK)).catch((err) => {
+        console.warn('saveReplaceRules batch error:', err)
+      })
+    }
   }
 
-  // 3. Restore RSS sources
+  // 3. Restore RSS sources in batches
   if (payload.rssSources.length) {
-    await saveRssSources(payload.rssSources).catch(() => undefined)
+    const RSS_CHUNK = 50
+    for (let i = 0; i < payload.rssSources.length; i += RSS_CHUNK) {
+      await saveRssSources(payload.rssSources.slice(i, i + RSS_CHUNK)).catch((err) => {
+        console.warn('saveRssSources batch error:', err)
+      })
+    }
   }
 
-  // 4. Restore Book sources in chunks of 80 to prevent network/subrequest timeout on huge backups
+  // 4. Restore Book sources in batches of 50 to prevent network/subrequest timeout on huge backups
   if (payload.bookSources.length) {
-    const CHUNK_SIZE = 80
-    for (let i = 0; i < payload.bookSources.length; i += CHUNK_SIZE) {
-      const slice = payload.bookSources.slice(i, i + CHUNK_SIZE)
+    const SOURCE_CHUNK = 50
+    for (let i = 0; i < payload.bookSources.length; i += SOURCE_CHUNK) {
+      const slice = payload.bookSources.slice(i, i + SOURCE_CHUNK)
       await saveBookSources(slice).catch((err) => {
         console.warn('saveBookSources batch error:', err)
       })
