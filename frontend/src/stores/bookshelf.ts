@@ -201,11 +201,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     }
     if (activeGroupId.value === -2) {
       return books.value.filter(
-        (b) =>
-          b.origin?.startsWith('local') ||
-          b.originName?.includes('本地') ||
-          b.kind?.includes('本地') ||
-          (b.group && (b.group === -2 || (b.group & -2) !== 0))
+        (b) => isLocalBook(b) || (b.group && (b.group === -2 || (b.group & -2) !== 0))
       )
     }
     return books.value.filter(

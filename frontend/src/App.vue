@@ -10,6 +10,8 @@
     <SourceManager v-model="appStore.showSourceManager" />
     <UserManager v-model="appStore.showUserManager" />
     <WebdavManager v-model="appStore.showWebdavManager" />
+    <RemoteWebdavModal v-model="appStore.showRemoteWebdav" />
+    <AiSettingsDrawer v-model="appStore.showAiSettings" />
 
     <!-- Toast notifications -->
     <div class="toast-container">
@@ -38,6 +40,8 @@ import LoginModal from './components/LoginModal.vue'
 import SourceManager from './components/SourceManager.vue'
 import UserManager from './components/UserManager.vue'
 import WebdavManager from './components/WebdavManager.vue'
+import RemoteWebdavModal from './components/RemoteWebdavModal.vue'
+import AiSettingsDrawer from './components/AiSettingsDrawer.vue'
 
 const route = useRoute()
 const appStore = useAppStore()

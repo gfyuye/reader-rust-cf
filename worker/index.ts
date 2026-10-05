@@ -1184,19 +1184,36 @@ async function handleTestBookSources(request: Request, env: Env): Promise<Respon
     }
   }
 
-  const successCount = results.filter((r) => r.status === "success").length;
+  const validCount = results.filter((r) => r.status === "success").length;
+  const invalidCount = results.length - validCount;
+
+  const mappedResults = results.map((r) => ({
+    bookSourceName: r.bookSourceName,
+    bookSourceUrl: r.bookSourceUrl,
+    valid: r.status === "success",
+    searchOk: r.status === "success",
+    exploreOk: false,
+    keyword,
+    markedInvalid: r.status !== "success",
+    error: r.error,
+  }));
+
   const summary = {
     total: results.length,
-    success: successCount,
-    failed: results.length - successCount,
+    success: validCount,
+    failed: invalidCount,
     durationMs: Date.now() - startTime,
   };
 
   return jsonResponse({
     isSuccess: true,
     data: {
+      total: results.length,
+      valid: validCount,
+      invalid: invalidCount,
+      markedInvalid: invalidCount,
+      results: mappedResults,
       summary,
-      results,
     },
   });
 }
@@ -2795,86 +2812,98 @@ async function handleGetRemoteWebdav(request: Request, env: Env): Promise<Respon
 }
 
 async function handleSaveRemoteWebdav(request: Request, env: Env): Promise<Response> {
-  const userNs = await resolveUserNs(request, env);
-  if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
+  try {
+    const userNs = await resolveUserNs(request, env);
+    if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
-  const body = await request.json<any>();
-  const { enabled, serverUrl, webdavUser, webdavPassword, syncOnChange, syncIntervalMins } = body;
+    const body = await request.json<any>();
+    const { enabled, serverUrl, webdavUser, webdavPassword, syncOnChange, syncIntervalMins } = body;
 
-  const now = Math.floor(Date.now() / 1000);
-  const enabledInt = enabled ? 1 : 0;
-  const syncOnChangeInt = syncOnChange ? 1 : 0;
-  const interval = parseInt(syncIntervalMins || "5", 10) || 5;
+    const now = Math.floor(Date.now() / 1000);
+    const enabledInt = enabled ? 1 : 0;
+    const syncOnChangeInt = syncOnChange ? 1 : 0;
+    const interval = parseInt(syncIntervalMins || "5", 10) || 5;
 
-  const existing = await env.DB.prepare(
-    `SELECT webdav_password FROM user_remote_webdav WHERE username = ?1`
-  )
-    .bind(userNs)
-    .first<{ webdav_password: string }>();
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO users (username, password_hash, is_admin, enable_webdav, status, created_at, updated_at)
+       VALUES (?1, '', 1, 1, 'active', ?2, ?3)`
+    ).bind(userNs, now, now).run();
 
-  let passwordToSave = existing?.webdav_password || "";
-  if (webdavPassword && webdavPassword !== "******") {
-    passwordToSave = webdavPassword;
+    const existing = await env.DB.prepare(
+      `SELECT webdav_password FROM user_remote_webdav WHERE username = ?1`
+    )
+      .bind(userNs)
+      .first<{ webdav_password: string }>();
+
+    let passwordToSave = existing?.webdav_password || "";
+    if (webdavPassword && webdavPassword !== "******") {
+      passwordToSave = webdavPassword;
+    }
+
+    await env.DB.prepare(
+      `INSERT INTO user_remote_webdav (username, enabled, server_url, webdav_user, webdav_password, sync_on_change, sync_interval_mins, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+       ON CONFLICT(username) DO UPDATE SET
+         enabled = excluded.enabled,
+         server_url = excluded.server_url,
+         webdav_user = excluded.webdav_user,
+         webdav_password = excluded.webdav_password,
+         sync_on_change = excluded.sync_on_change,
+         sync_interval_mins = excluded.sync_interval_mins,
+         updated_at = excluded.updated_at`
+    )
+      .bind(userNs, enabledInt, serverUrl || "", webdavUser || "", passwordToSave, syncOnChangeInt, interval, now)
+      .run();
+
+    return jsonResponse({ isSuccess: true, data: "配置保存成功" });
+  } catch (err: any) {
+    console.error("handleSaveRemoteWebdav error:", err);
+    return jsonResponse({ isSuccess: false, errorMsg: err.message || "保存配置失败" });
   }
-
-  await env.DB.prepare(
-    `INSERT INTO user_remote_webdav (username, enabled, server_url, webdav_user, webdav_password, sync_on_change, sync_interval_mins, updated_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-     ON CONFLICT(username) DO UPDATE SET
-       enabled = excluded.enabled,
-       server_url = excluded.server_url,
-       webdav_user = excluded.webdav_user,
-       webdav_password = excluded.webdav_password,
-       sync_on_change = excluded.sync_on_change,
-       sync_interval_mins = excluded.sync_interval_mins,
-       updated_at = excluded.updated_at`
-  )
-    .bind(userNs, enabledInt, serverUrl || "", webdavUser || "", passwordToSave, syncOnChangeInt, interval, now)
-    .run();
-
-  return jsonResponse({ isSuccess: true, data: "配置保存成功" });
 }
 
 async function handleTestRemoteWebdav(request: Request, env: Env): Promise<Response> {
-  const userNs = await resolveUserNs(request, env);
-  if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
-
-  const body = await request.json<any>();
-  let { serverUrl, webdavUser, webdavPassword } = body;
-
-  if (webdavPassword === "******") {
-    const existing = await env.DB.prepare(
-      `SELECT webdav_password FROM user_remote_webdav WHERE username = ?1`
-    ).bind(userNs).first<{ webdav_password: string }>();
-    webdavPassword = existing?.webdav_password || "";
-  }
-
-  if (!serverUrl || !webdavUser || !webdavPassword) {
-    return jsonResponse({ isSuccess: false, errorMsg: "请填写完整 WebDAV 地址、用户名和密码" });
-  }
-
-  if (!isSafeRemoteUrl(serverUrl)) {
-    return jsonResponse({ isSuccess: false, errorMsg: "WebDAV 地址不合法或指向受限网络" });
-  }
-
   try {
-    const baseUrl = serverUrl.replace(/\/$/, "");
+    const userNs = await resolveUserNs(request, env);
+    if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
+
+    const body = await request.json<any>();
+    let { serverUrl, webdavUser, webdavPassword } = body;
+
+    if (webdavPassword === "******") {
+      const existing = await env.DB.prepare(
+        `SELECT webdav_password FROM user_remote_webdav WHERE username = ?1`
+      ).bind(userNs).first<{ webdav_password: string }>();
+      webdavPassword = existing?.webdav_password || "";
+    }
+
+    if (!serverUrl || !webdavUser || !webdavPassword) {
+      return jsonResponse({ isSuccess: false, errorMsg: "请填写完整 WebDAV 地址、用户名和密码" });
+    }
+
+    if (!isSafeRemoteUrl(serverUrl)) {
+      return jsonResponse({ isSuccess: false, errorMsg: "WebDAV 地址不合法或指向受限网络" });
+    }
+
     const authHeader = `Basic ${btoa(webdavUser + ":" + webdavPassword)}`;
-    const resp = await fetch(baseUrl, {
-      method: "OPTIONS",
-      headers: { Authorization: authHeader },
+    const cleanUrl = serverUrl.replace(/\/$/, "");
+
+    const resp = await fetch(cleanUrl, {
+      method: "PROPFIND",
+      headers: {
+        Authorization: authHeader,
+        Depth: "0",
+      },
+      signal: AbortSignal.timeout(8000),
     });
 
-    if (resp.status === 401 || resp.status === 403) {
-      return jsonResponse({ isSuccess: false, errorMsg: "认证失败，请检查 WebDAV 账号或应用密码" });
+    if (resp.ok || resp.status === 207) {
+      return jsonResponse({ isSuccess: true, data: "连接成功！WebDAV 服务正常响应。" });
+    } else {
+      return jsonResponse({ isSuccess: false, errorMsg: `连接响应异常 (HTTP ${resp.status}): 请检查路径与账号权限` });
     }
-    if (resp.ok || resp.status === 405 || resp.status === 207) {
-      return jsonResponse({ isSuccess: true, data: "连接成功！远端 WebDAV 服务正常响应" });
-    }
-
-    return jsonResponse({ isSuccess: false, errorMsg: `远端返回 HTTP ${resp.status}` });
   } catch (err: any) {
-    return jsonResponse({ isSuccess: false, errorMsg: `连接失败: ${err.message}` });
+    return jsonResponse({ isSuccess: false, errorMsg: err.message || "测试连接失败" });
   }
 }
 
@@ -4411,57 +4440,95 @@ async function handleGetChapterList(request: Request, env: Env): Promise<Respons
 
   let bookUrl = new URL(request.url).searchParams.get("bookUrl") || "";
   let tocUrl = new URL(request.url).searchParams.get("tocUrl") || "";
-  if ((!bookUrl || !tocUrl) && request.method === "POST") {
+  let bookName = "";
+  if (request.method === "POST") {
     try {
       const body = await request.json<any>();
       bookUrl = body.bookUrl || bookUrl;
       tocUrl = body.tocUrl || tocUrl;
+      bookName = (body.name || "").trim();
     } catch {}
   }
 
   const targetUrl = bookUrl || tocUrl;
+  const cleanTarget = decodeURIComponent(targetUrl);
+  const fileNameCandidate = cleanTarget.split("/").pop()?.split("#")[0]?.trim() || "";
 
   // 1. Local TXT Chapters
-  if (targetUrl.startsWith("local-txt:")) {
-    const bookId = targetUrl.split(":")[1].split("#")[0];
-    const rows = await env.DB.prepare(
-      `SELECT chapter_index, title FROM txt_chapters WHERE book_id = ?1 ORDER BY chapter_index ASC`
-    ).bind(bookId).all<{ chapter_index: number; title: string }>();
+  if (targetUrl.startsWith("local-txt:") || cleanTarget.toLowerCase().includes(".txt")) {
+    let bookId = targetUrl.startsWith("local-txt:") ? targetUrl.split(":")[1].split("#")[0] : "";
+    if (!bookId) {
+      const row = await env.DB.prepare(
+        `SELECT book_id FROM txt_books WHERE user_ns = ?1 AND (file_name = ?2 OR title = ?3) LIMIT 1`
+      ).bind(userNs, fileNameCandidate, bookName).first<{ book_id: string }>();
+      bookId = row?.book_id || "";
+    }
 
-    const chapters = (rows.results || []).map((r) => ({
-      index: r.chapter_index,
-      title: r.title,
-      url: `${targetUrl}#${r.chapter_index}`,
-    }));
-    return jsonResponse({ isSuccess: true, data: chapters });
+    if (bookId) {
+      const rows = await env.DB.prepare(
+        `SELECT chapter_index, title FROM txt_chapters WHERE book_id = ?1 ORDER BY chapter_index ASC`
+      ).bind(bookId).all<{ chapter_index: number; title: string }>();
+
+      if (rows.results && rows.results.length > 0) {
+        const chapters = rows.results.map((r) => ({
+          index: r.chapter_index,
+          title: r.title,
+          url: `local-txt:${bookId}#${r.chapter_index}`,
+        }));
+        return jsonResponse({ isSuccess: true, data: chapters });
+      }
+    }
+    return jsonResponse({ isSuccess: false, errorMsg: "书籍不存在，请重新上传" });
   }
 
   // 2. Local EPUB Chapters
-  if (targetUrl.startsWith("local-epub:")) {
-    const bookId = targetUrl.split(":")[1].split("#")[0];
-    const rows = await env.DB.prepare(
-      `SELECT chapter_index, title FROM epub_chapters WHERE book_id = ?1 ORDER BY chapter_index ASC`
-    ).bind(bookId).all<{ chapter_index: number; title: string }>();
+  if (targetUrl.startsWith("local-epub:") || cleanTarget.toLowerCase().includes(".epub")) {
+    let bookId = targetUrl.startsWith("local-epub:") ? targetUrl.split(":")[1].split("#")[0] : "";
+    if (!bookId) {
+      const row = await env.DB.prepare(
+        `SELECT book_id FROM epub_books WHERE user_ns = ?1 AND (file_name = ?2 OR title = ?3) LIMIT 1`
+      ).bind(userNs, fileNameCandidate, bookName).first<{ book_id: string }>();
+      bookId = row?.book_id || "";
+    }
 
-    const chapters = (rows.results || []).map((r) => ({
-      index: r.chapter_index,
-      title: r.title,
-      url: `${targetUrl}#${r.chapter_index}`,
-    }));
-    return jsonResponse({ isSuccess: true, data: chapters });
+    if (bookId) {
+      const rows = await env.DB.prepare(
+        `SELECT chapter_index, title FROM epub_chapters WHERE book_id = ?1 ORDER BY chapter_index ASC`
+      ).bind(bookId).all<{ chapter_index: number; title: string }>();
+
+      if (rows.results && rows.results.length > 0) {
+        const chapters = rows.results.map((r) => ({
+          index: r.chapter_index,
+          title: r.title,
+          url: `local-epub:${bookId}#${r.chapter_index}`,
+        }));
+        return jsonResponse({ isSuccess: true, data: chapters });
+      }
+    }
+    return jsonResponse({ isSuccess: false, errorMsg: "书籍不存在，请重新上传" });
   }
 
   // 3. Local PDF Pages
-  if (targetUrl.startsWith("local-pdf:") || targetUrl.includes(".pdf")) {
-    const bookId = targetUrl.split(":")[1]?.split("#")[0] || targetUrl;
-    const book = await env.DB.prepare(`SELECT total_pages FROM pdf_books WHERE book_id = ?1`).bind(bookId).first<{ total_pages: number }>();
-    const count = Math.max(1, book?.total_pages || 1);
-    const chapters = Array.from({ length: count }, (_, i) => ({
-      index: i,
-      title: `第 ${i + 1} 页`,
-      url: `${targetUrl.split("#")[0]}#${i}`,
-    }));
-    return jsonResponse({ isSuccess: true, data: chapters });
+  if (targetUrl.startsWith("local-pdf:") || cleanTarget.toLowerCase().includes(".pdf")) {
+    let bookId = targetUrl.startsWith("local-pdf:") ? targetUrl.split(":")[1]?.split("#")[0] : "";
+    if (!bookId) {
+      const row = await env.DB.prepare(
+        `SELECT book_id FROM pdf_books WHERE user_ns = ?1 AND (file_name = ?2 OR title = ?3) LIMIT 1`
+      ).bind(userNs, fileNameCandidate, bookName).first<{ book_id: string }>();
+      bookId = row?.book_id || "";
+    }
+
+    if (bookId) {
+      const book = await env.DB.prepare(`SELECT total_pages FROM pdf_books WHERE book_id = ?1`).bind(bookId).first<{ total_pages: number }>();
+      const count = Math.max(1, book?.total_pages || 1);
+      const chapters = Array.from({ length: count }, (_, i) => ({
+        index: i,
+        title: `第 ${i + 1} 页`,
+        url: `local-pdf:${bookId}#${i}`,
+      }));
+      return jsonResponse({ isSuccess: true, data: chapters });
+    }
+    return jsonResponse({ isSuccess: false, errorMsg: "书籍不存在，请重新上传" });
   }
 
   return jsonResponse({ isSuccess: true, data: [] });

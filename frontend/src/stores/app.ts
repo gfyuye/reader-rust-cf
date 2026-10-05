@@ -152,6 +152,8 @@ export const useAppStore = defineStore('app', () => {
   const showWebdavManager = ref(false)
   const showGroupManager = ref(false)
   const showCacheManager = ref(false)
+  const showAiSettings = ref(false)
+  const showRemoteWebdav = ref(false)
   const triggerImportLocalBookEvent = ref(0)
 
   function triggerImportLocalBook() {
@@ -278,7 +280,7 @@ export const useAppStore = defineStore('app', () => {
     versionUpdate, versionUpdateLoading, versionUpdateChecked, canCheckVersionUpdate, hasVersionUpdateReminder,
     fetchUserInfo, setUser, clearUser, setSecureKey, updateUserInfo, checkVersionUpdate, dismissVersionUpdateReminder,
     showLoginModal, showSettingsDrawer, showSourceManager, showUserManager, showWebdavManager,
-    showGroupManager, showCacheManager, triggerImportLocalBookEvent, triggerImportLocalBook,
+    showGroupManager, showCacheManager, showAiSettings, showRemoteWebdav, triggerImportLocalBookEvent, triggerImportLocalBook,
     isOnline, pwaReady, pwaUpdateAvailable, deferredInstallPrompt, waitingServiceWorker,
     setOnlineStatus, setPwaReady, setPwaUpdateAvailable, setDeferredInstallPrompt, setWaitingServiceWorker, installPwa, applyPwaUpdate,
     readingStats, readingStatsSummary, startReadingSession, stopReadingSession, markBookOpened, markChapterRead,

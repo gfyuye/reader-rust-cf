@@ -262,7 +262,7 @@ async function handleBookClick(book: Book | SearchBook) {
     await loadBookTask
     await readerStore.loadChapter(targetIndex)
   } catch (err: any) {
-    appStore.showToast(err.message || '本地书籍不存在，请重新导入', 'error')
+    appStore.showToast(err.message || '书籍不存在，请重新上传', 'error')
     router.replace('/')
   } finally {
     openingBookUrl.value = ''

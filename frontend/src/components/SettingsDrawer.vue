@@ -329,8 +329,6 @@
           </section>
         </div>
       </aside>
-      <RemoteWebdavModal v-model="showRemoteWebdavModal" />
-      <AiSettingsDrawer v-model="showAiSettingsDrawer" />
     </Transition>
     <div v-if="showVerifyAdminModal" class="verify-admin-overlay" @click="showVerifyAdminModal = false">
       <div class="verify-admin-modal" @click.stop>
@@ -356,8 +354,6 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
-import RemoteWebdavModal from './RemoteWebdavModal.vue'
-import AiSettingsDrawer from './AiSettingsDrawer.vue'
 import { useAppStore } from '../stores/app'
 import { useBookshelfStore } from '../stores/bookshelf'
 import { changePassword, logout as apiLogout } from '../api/user'
@@ -556,18 +552,14 @@ function handleToggleEditMode() {
   shelfStore.editMode = !shelfStore.editMode
 }
 
-const showAiSettingsDrawer = ref(false)
-
 function openAiSettingsDrawer() {
   close()
-  showAiSettingsDrawer.value = true
+  appStore.showAiSettings = true
 }
-
-const showRemoteWebdavModal = ref(false)
 
 function openRemoteWebdavModal() {
   close()
-  showRemoteWebdavModal.value = true
+  appStore.showRemoteWebdav = true
 }
 
 function setTheme(t: 'light' | 'dark') {

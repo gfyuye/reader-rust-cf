@@ -310,7 +310,9 @@ async function testSources() {
   try {
     const batches = chunkBookSourceUrls(targets.map((source) => source.bookSourceUrl))
     const responses = []
+    let completedCount = 0
     for (const batch of batches) {
+      appStore.showToast(`正在测试书源 (${completedCount}/${targets.length})...`)
       responses.push(
         await testBookSources({
           bookSourceUrls: batch,
@@ -318,6 +320,7 @@ async function testSources() {
           concurrent: 12,
         })
       )
+      completedCount += batch.length
     }
     const result = mergeBookSourceTestResponses(responses)
     await loadSources()
