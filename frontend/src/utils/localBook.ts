@@ -1,17 +1,72 @@
-import type { Book, SearchBook } from '../types'
-
-type BookLike = Pick<Book | SearchBook, 'origin' | 'bookUrl'>
-
-export function isLocalTxtBook(book?: BookLike | null) {
-  if (!book) return false
-  return book.origin?.trim() === 'local-txt' || book.bookUrl?.trim().startsWith('local-txt:')
+interface BookLike {
+  origin?: string
+  bookUrl?: string
+  originName?: string
+  kind?: string
+  tocUrl?: string
 }
 
-export function isLocalEpubBook(book?: BookLike | null) {
+export function isLocalTxtBook(book?: BookLike | null): boolean {
   if (!book) return false
-  return book.origin?.trim() === 'local-epub' || book.bookUrl?.trim().startsWith('local-epub:')
+  const origin = (book.origin || '').trim().toLowerCase()
+  const url = (book.bookUrl || '').trim().toLowerCase()
+  const toc = (book.tocUrl || '').trim().toLowerCase()
+  const kind = (book.kind || '').trim().toLowerCase()
+  const originName = (book.originName || '').trim().toLowerCase()
+
+  return (
+    origin === 'local-txt' ||
+    origin === 'txt' ||
+    url.startsWith('local-txt:') ||
+    url.endsWith('.txt') ||
+    url.includes('.txt#') ||
+    toc.endsWith('.txt') ||
+    kind.includes('txt') ||
+    (origin === 'local' && (url.endsWith('.txt') || originName.includes('txt') || kind.includes('txt')))
+  )
 }
 
-export function isLocalBook(book?: BookLike | null) {
-  return isLocalTxtBook(book) || isLocalEpubBook(book)
+export function isLocalEpubBook(book?: BookLike | null): boolean {
+  if (!book) return false
+  const origin = (book.origin || '').trim().toLowerCase()
+  const url = (book.bookUrl || '').trim().toLowerCase()
+  const toc = (book.tocUrl || '').trim().toLowerCase()
+  const kind = (book.kind || '').trim().toLowerCase()
+  const originName = (book.originName || '').trim().toLowerCase()
+
+  return (
+    origin === 'local-epub' ||
+    origin === 'epub' ||
+    url.startsWith('local-epub:') ||
+    url.endsWith('.epub') ||
+    url.includes('.epub#') ||
+    toc.endsWith('.epub') ||
+    kind.includes('epub') ||
+    (origin === 'local' && (url.endsWith('.epub') || originName.includes('epub') || kind.includes('epub')))
+  )
+}
+
+export function isLocalPdfBook(book?: BookLike | null): boolean {
+  if (!book) return false
+  const origin = (book.origin || '').trim().toLowerCase()
+  const url = (book.bookUrl || '').trim().toLowerCase()
+  const toc = (book.tocUrl || '').trim().toLowerCase()
+  const kind = (book.kind || '').trim().toLowerCase()
+  const originName = (book.originName || '').trim().toLowerCase()
+
+  return (
+    origin === 'local-pdf' ||
+    origin === 'pdf' ||
+    url.startsWith('local-pdf:') ||
+    url.endsWith('.pdf') ||
+    url.includes('.pdf#') ||
+    toc.endsWith('.pdf') ||
+    kind.includes('pdf') ||
+    (origin === 'local' && (url.endsWith('.pdf') || originName.includes('pdf') || kind.includes('pdf')))
+  )
+}
+
+export function isLocalBook(book?: BookLike | null): boolean {
+  if (!book) return false
+  return isLocalTxtBook(book) || isLocalEpubBook(book) || isLocalPdfBook(book)
 }

@@ -9,7 +9,7 @@
           <header class="modal-header">
             <div>
               <h2>WebDAV 文件管理</h2>
-              <p class="subtitle">管理云端存储与备份文件，支持直接将 TXT、EPUB、PDF、MOBI 导入至书架</p>
+              <p class="subtitle">管理云端存储与备份文件，支持直接将 TXT、EPUB、PDF 导入至书架</p>
             </div>
             <button class="icon-btn" @click="close" aria-label="关闭">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -239,9 +239,7 @@ function isBookFile(name: string) {
   return (
     lower.endsWith('.txt') ||
     lower.endsWith('.epub') ||
-    lower.endsWith('.pdf') ||
-    lower.endsWith('.mobi') ||
-    lower.endsWith('.prc')
+    lower.endsWith('.pdf')
   )
 }
 

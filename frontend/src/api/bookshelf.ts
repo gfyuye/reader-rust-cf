@@ -73,22 +73,6 @@ export function uploadPdfBook(file: File, onProgress?: (percent: number) => void
   }).then((r) => r.data)
 }
 
-export function uploadMobiBook(file: File, onProgress?: (percent: number) => void) {
-  if (file.size > LARGE_FILE_THRESHOLD) {
-    return uploadFileChunked({ file, fileName: file.name, target: 'bookshelf', onProgress })
-  }
-  const formData = new FormData()
-  formData.append('file', file)
-  return http.post<Book>('/uploadMobiBook', formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-    onUploadProgress: (e) => {
-      if (onProgress && e.total) {
-        onProgress(Math.round((e.loaded * 100) / e.total))
-      }
-    },
-  }).then((r) => r.data)
-}
-
 export function deleteBook(book: Partial<Book>) {
   return http.post<string>('/deleteBook', book).then((r) => r.data)
 }

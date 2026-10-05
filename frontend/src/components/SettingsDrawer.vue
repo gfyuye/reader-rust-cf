@@ -403,7 +403,7 @@ const webdavStatusTitle = computed(() => {
 const webdavStatusMessage = computed(() => {
   if (!appStore.isLoggedIn) return '登录并具备文件权限后，可管理云端文件并将书籍导入书架。'
   return appStore.userInfo?.enableWebdav
-    ? '支持云端文件浏览、直接将 TXT/EPUB/PDF/MOBI 导入至书架，以及管理备份文件。'
+    ? '支持云端文件浏览、直接将 TXT/EPUB/PDF 导入至书架，以及管理备份文件。'
     : '请联系管理员为当前账号开通文件管理权限。'
 })
 const versionUpdateTitle = computed(() => {

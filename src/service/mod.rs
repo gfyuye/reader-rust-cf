@@ -7,7 +7,6 @@ pub mod epub_stream_service;
 pub mod json_document_service;
 pub mod local_epub_book;
 pub mod local_txt_book;
-pub mod mobi_stream_service;
 pub mod pdf_stream_service;
 pub mod txt_stream_service;
 pub mod update_service;
