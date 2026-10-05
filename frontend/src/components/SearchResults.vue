@@ -68,6 +68,11 @@
           </option>
         </select>
       </div>
+
+      <label class="strict-mode-toggle" title="选中时书名必须与搜索词完全一致，未选中则模糊匹配">
+        <input v-model="strictMode" type="checkbox" />
+        <span class="strict-label">严格模式（书名完全一致）</span>
+      </label>
     </div>
 
     <BookGrid
@@ -152,15 +157,20 @@ const sourceOptions = computed(() => {
     })
 })
 
+const strictMode = ref(false)
+
 const localLibraryMatches = computed<SearchBook[]>(() => {
   const key = (searchKey.value || '').trim().toLowerCase()
   if (!key) return []
   return shelfStore.books
-    .filter(
-      (b) =>
-        (b.name && b.name.toLowerCase().includes(key)) ||
-        (b.author && b.author.toLowerCase().includes(key))
-    )
+    .filter((b) => {
+      const bName = (b.name || '').trim().toLowerCase()
+      const bAuthor = (b.author || '').trim().toLowerCase()
+      if (strictMode.value) {
+        return bName === key
+      }
+      return bName.includes(key) || bAuthor.includes(key)
+    })
     .map((b) => ({
       name: b.name,
       author: b.author || '未知作者',
@@ -176,14 +186,21 @@ const localLibraryMatches = computed<SearchBook[]>(() => {
 })
 
 const displayResults = computed<SearchBook[]>(() => {
-  const mapped = results.value.map((book) => {
-    const source = sourceByUrl.value.get(book.origin)
-    return {
-      ...book,
-      originName: book.originName || source?.bookSourceName || book.origin,
-      originGroup: book.originGroup || source?.bookSourceGroup,
-    }
-  })
+  const key = (searchKey.value || '').trim().toLowerCase()
+  const mapped = results.value
+    .filter((book) => {
+      if (!strictMode.value) return true
+      const bName = (book.name || '').trim().toLowerCase()
+      return bName === key
+    })
+    .map((book) => {
+      const source = sourceByUrl.value.get(book.origin)
+      return {
+        ...book,
+        originName: book.originName || source?.bookSourceName || book.origin,
+        originGroup: book.originGroup || source?.bookSourceGroup,
+      }
+    })
 
   const shelfUrls = new Set(localLibraryMatches.value.map((b) => b.bookUrl))
   const uniqueNetwork = mapped.filter((b) => !shelfUrls.has(b.bookUrl))
@@ -506,6 +523,30 @@ defineEmits<{
   background: var(--color-bg-elevated);
   color: var(--color-text);
   font-size: var(--text-sm);
+}
+
+.strict-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+  cursor: pointer;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  user-select: none;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-elevated);
+}
+
+.strict-mode-toggle input[type="checkbox"] {
+  cursor: pointer;
+  accent-color: var(--color-primary);
+}
+
+.strict-label {
+  font-weight: 500;
 }
 
 @media (max-width: 720px) {
