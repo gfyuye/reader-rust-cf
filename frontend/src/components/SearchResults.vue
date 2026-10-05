@@ -152,8 +152,31 @@ const sourceOptions = computed(() => {
     })
 })
 
+const localLibraryMatches = computed<SearchBook[]>(() => {
+  const key = (searchKey.value || '').trim().toLowerCase()
+  if (!key) return []
+  return shelfStore.books
+    .filter(
+      (b) =>
+        (b.name && b.name.toLowerCase().includes(key)) ||
+        (b.author && b.author.toLowerCase().includes(key))
+    )
+    .map((b) => ({
+      name: b.name,
+      author: b.author || '未知作者',
+      bookUrl: b.bookUrl,
+      origin: b.origin,
+      originName: '书架已有 · ' + (b.originName || (b.origin?.startsWith('local-') ? '本地书' : b.origin)),
+      coverUrl: b.coverUrl,
+      intro: b.intro || (b.durChapterTitle ? `上次读到：${b.durChapterTitle}` : '已在书架中'),
+      kind: b.kind || (b.origin?.startsWith('local-') ? '本地书籍' : '书架藏书'),
+      latestChapterTitle: b.latestChapterTitle || b.durChapterTitle,
+      wordCount: b.wordCount,
+    }))
+})
+
 const displayResults = computed<SearchBook[]>(() => {
-  return results.value.map((book) => {
+  const mapped = results.value.map((book) => {
     const source = sourceByUrl.value.get(book.origin)
     return {
       ...book,
@@ -161,6 +184,10 @@ const displayResults = computed<SearchBook[]>(() => {
       originGroup: book.originGroup || source?.bookSourceGroup,
     }
   })
+
+  const shelfUrls = new Set(localLibraryMatches.value.map((b) => b.bookUrl))
+  const uniqueNetwork = mapped.filter((b) => !shelfUrls.has(b.bookUrl))
+  return [...localLibraryMatches.value, ...uniqueNetwork]
 })
 
 function ensureSearchSelection() {
@@ -307,11 +334,21 @@ onUnmounted(() => {
 })
 
 async function handleBookClick(book: Book | SearchBook) {
+  const existing = shelfStore.books.find((b) => b.bookUrl === book.bookUrl)
+  if (existing) {
+    const loadBookTask = readerStore.loadBook(existing)
+    await router.push('/reader')
+    await loadBookTask
+    await readerStore.loadChapter(existing.durChapterIndex || 0)
+    return
+  }
+
   const b = book as Book
   if (b.origin && b.bookUrl) {
-    await readerStore.loadBook(b)
+    const loadBookTask = readerStore.loadBook(b)
+    await router.push('/reader')
+    await loadBookTask
     await readerStore.loadChapter(b.durChapterIndex || 0)
-    router.push('/reader')
   }
 }
 

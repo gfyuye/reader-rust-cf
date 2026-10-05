@@ -1187,6 +1187,24 @@ async function handleTestBookSources(request: Request, env: Env): Promise<Respon
   const validCount = results.filter((r) => r.status === "success").length;
   const invalidCount = results.length - validCount;
 
+  // If markInvalid is enabled, add "失效" to the group of failed sources in D1
+  if (body.markInvalid !== false && invalidCount > 0) {
+    const invalidUrls = new Set(results.filter((r) => r.status !== "success").map((r) => r.bookSourceUrl));
+    const now = Math.floor(Date.now() / 1000);
+    for (const s of allSources) {
+      if (invalidUrls.has(s.bookSourceUrl)) {
+        const groups = (s.bookSourceGroup || "").split(/[,，;；]/).map((g: string) => g.trim()).filter(Boolean);
+        if (!groups.includes("失效")) {
+          groups.push("失效");
+          s.bookSourceGroup = groups.join(",");
+          await env.DB.prepare(
+            `UPDATE book_sources SET json = ?1, updated_at = ?2 WHERE user_ns = ?3 AND book_source_url = ?4`
+          ).bind(JSON.stringify(s), now, userNs, s.bookSourceUrl).run();
+        }
+      }
+    }
+  }
+
   const mappedResults = results.map((r) => ({
     bookSourceName: r.bookSourceName,
     bookSourceUrl: r.bookSourceUrl,
