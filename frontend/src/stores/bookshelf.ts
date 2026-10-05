@@ -135,23 +135,52 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   const activeGroupId = ref<number>(-1) // -1 = all
 
   function ensureSystemGroups(raw: BookGroup[]): BookGroup[] {
-    const list = (raw || []).slice()
-    let allGroup = list.find((g) => g.groupId === -1 || g.groupName === '全部')
-    if (!allGroup) {
-      allGroup = { groupId: -1, groupName: '全部', orderNo: -100 }
-      list.unshift(allGroup)
-    } else {
-      allGroup.groupId = -1
-      allGroup.groupName = '全部'
+    const list: BookGroup[] = []
+    const seenIds = new Set<number>()
+    const seenNames = new Set<string>()
+
+    // Standardize orderNo / order property and deduplicate
+    for (const g of raw || []) {
+      if (!g) continue
+      const gId = Number(g.groupId ?? 0)
+      const gName = (g.groupName || '').trim()
+      const order = Number(g.orderNo ?? (g as any).order ?? 0)
+
+      // Normalize "全部"
+      if (gId === -1 || gName === '全部') {
+        if (!seenNames.has('全部')) {
+          seenNames.add('全部')
+          seenIds.add(-1)
+          list.push({ ...g, groupId: -1, groupName: '全部', orderNo: order || -100, show: true, hidden: false })
+        }
+        continue
+      }
+
+      // Normalize "未分组"
+      if (gId === -4 || gId === 0 || gName === '未分组') {
+        if (!seenNames.has('未分组')) {
+          seenNames.add('未分组')
+          seenIds.add(-4)
+          list.push({ ...g, groupId: -4, groupName: '未分组', orderNo: order || 900 })
+        }
+        continue
+      }
+
+      if (!seenIds.has(gId) && !seenNames.has(gName)) {
+        seenIds.add(gId)
+        seenNames.add(gName)
+        list.push({ ...g, groupId: gId, groupName: gName, orderNo: order })
+      }
     }
 
-    let ungrouped = list.find((g) => g.groupId === 0 || g.groupName === '未分组')
-    if (!ungrouped) {
-      ungrouped = { groupId: 0, groupName: '未分组', orderNo: 1000 }
-      list.push(ungrouped)
-    } else {
-      ungrouped.groupId = 0
-      ungrouped.groupName = '未分组'
+    // Ensure "全部" exists
+    if (!seenNames.has('全部')) {
+      list.unshift({ groupId: -1, groupName: '全部', orderNo: -100, show: true, hidden: false })
+    }
+
+    // Ensure "未分组" exists
+    if (!seenNames.has('未分组')) {
+      list.push({ groupId: -4, groupName: '未分组', orderNo: 900 })
     }
 
     list.sort((a, b) => (a.orderNo ?? 0) - (b.orderNo ?? 0))
@@ -159,16 +188,28 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   }
 
   const displayGroups = computed(() => {
-    return groups.value.filter((g) => !g.hidden && g.show !== false)
+    return groups.value.filter((g) => {
+      if (g.groupId === -1) return !g.hidden
+      return !g.hidden && g.show !== false
+    })
   })
 
   const filteredBooks = computed(() => {
     if (activeGroupId.value === -1) return books.value
-    if (activeGroupId.value === 0) {
-      return books.value.filter((b) => !b.group || b.group === 0)
+    if (activeGroupId.value === -4 || activeGroupId.value === 0) {
+      return books.value.filter((b) => !b.group || b.group === 0 || b.group === -4 || b.group === -5)
+    }
+    if (activeGroupId.value === -2) {
+      return books.value.filter(
+        (b) =>
+          b.origin?.startsWith('local') ||
+          b.originName?.includes('本地') ||
+          b.kind?.includes('本地') ||
+          (b.group && (b.group === -2 || (b.group & -2) !== 0))
+      )
     }
     return books.value.filter(
-      (b) => b.group && (b.group & activeGroupId.value) !== 0
+      (b) => b.group && (b.group === activeGroupId.value || (b.group & activeGroupId.value) !== 0)
     )
   })
 
@@ -182,7 +223,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   }
 
   async function saveGroup(groupName: string, groupId = 0) {
-    if (groupId === -1 || groupId === 0) return groupId
+    if (groupId === -1 || groupId === -4 || groupId === 0) return groupId
     let existingGroup = groups.value.find((g) => g.groupId === groupId)
     if (groupId <= 0) {
       const existingIds = groups.value.map((g) => g.groupId).filter((id) => id > 0)
@@ -213,7 +254,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   }
 
   async function removeGroup(groupId: number) {
-    if (groupId === -1 || groupId === 0) return
+    if (groupId === -1 || groupId === -4 || groupId === 0) return
     await apiDeleteBookGroup(groupId)
     groups.value = groups.value.filter((group) => group.groupId !== groupId)
     books.value = books.value.map((book) => {

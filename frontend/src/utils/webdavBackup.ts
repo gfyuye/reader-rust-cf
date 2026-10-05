@@ -128,11 +128,18 @@ export async function restoreBackupFromBytes(bytes: Uint8Array): Promise<void> {
 
     const knownKeys = [
       'bookshelf.json',
+      'booksources.json',
       'booksource.json',
+      'bookgroups.json',
       'bookgroup.json',
       'bookmark.json',
+      'bookmarks.json',
       'replacerule.json',
+      'replacerules.json',
       'rsssource.json',
+      'rsssources.json',
+      'rss_sources.json',
+      'rss.json',
       'readconfig.json',
       'txttocrule.json',
       'httptts.json',
@@ -147,7 +154,7 @@ export async function restoreBackupFromBytes(bytes: Uint8Array): Promise<void> {
       normalizedFiles['my_backup.json'] ||
       Object.entries(normalizedFiles).find(([k]) => k.endsWith('.json') && !knownKeys.includes(k))?.[1]
 
-    if (singleBackupData && !normalizedFiles['bookshelf.json']) {
+    if (singleBackupData && !normalizedFiles['bookshelf.json'] && !normalizedFiles['booksources.json']) {
       try {
         const singleText = decoder.decode(singleBackupData)
         const payload = parseWebdavBackup(singleText)
@@ -163,14 +170,17 @@ export async function restoreBackupFromBytes(bytes: Uint8Array): Promise<void> {
       throw new Error('该 ZIP 压缩包不包含有效的阅读备份文件 (未找到 bookshelf.json / backup.json 等)')
     }
 
-    const parseJson = <T>(name: string, fallback: T): T => {
-      const data = normalizedFiles[name.toLowerCase()] || normalizedFiles[name]
-      if (!data) return fallback
-      try {
-        return JSON.parse(decoder.decode(data)) as T
-      } catch {
-        return fallback
+    const parseJson = <T>(names: string | string[], fallback: T): T => {
+      const candidates = Array.isArray(names) ? names : [names]
+      for (const name of candidates) {
+        const data = normalizedFiles[name.toLowerCase()] || normalizedFiles[name]
+        if (data) {
+          try {
+            return JSON.parse(decoder.decode(data)) as T
+          } catch {}
+        }
       }
+      return fallback
     }
 
     const payload: WebdavBackupPayload = {
@@ -178,14 +188,14 @@ export async function restoreBackupFromBytes(bytes: Uint8Array): Promise<void> {
       createdAt: new Date().toISOString(),
       app: 'legado-zip-backup',
       bookshelf: {
-        books: parseJson<Book[]>('bookshelf.json', []),
-        groups: parseJson<BookGroup[]>('bookGroup.json', []),
+        books: parseJson<Book[]>(['bookshelf.json', 'books.json'], []),
+        groups: parseJson<BookGroup[]>(['bookgroup.json', 'bookgroups.json', 'groups.json'], []),
       },
-      bookSources: parseJson<BookSource[]>('bookSource.json', []),
-      rssSources: parseJson<RssSource[]>('rssSource.json', []),
-      bookmarks: parseJson<Bookmark[]>('bookmark.json', []),
-      replaceRules: parseJson<ReplaceRule[]>('replaceRule.json', []),
-      localState: parseJson<Record<string, string>>('readConfig.json', {}),
+      bookSources: parseJson<BookSource[]>(['booksource.json', 'booksources.json', 'sources.json'], []),
+      rssSources: parseJson<RssSource[]>(['rsssource.json', 'rsssources.json', 'rss_sources.json', 'rss.json'], []),
+      bookmarks: parseJson<Bookmark[]>(['bookmark.json', 'bookmarks.json'], []),
+      replaceRules: parseJson<ReplaceRule[]>(['replacerule.json', 'replacerules.json', 'rules.json'], []),
+      localState: parseJson<Record<string, string>>('readconfig.json', {}),
     }
 
     await restoreWebdavBackup(payload)
@@ -199,23 +209,55 @@ export async function restoreBackupFromBytes(bytes: Uint8Array): Promise<void> {
 }
 
 export function parseWebdavBackup(raw: string): WebdavBackupPayload {
-  const payload = JSON.parse(raw) as Partial<WebdavBackupPayload>
-  if (!payload || typeof payload !== 'object') {
+  const parsed = JSON.parse(raw) as any
+  if (!parsed || typeof parsed !== 'object') {
     throw new Error('备份文件格式无效')
   }
+
+  if (Array.isArray(parsed)) {
+    // Array of RSS Sources
+    if (parsed.length > 0 && parsed[0].sourceUrl) {
+      return {
+        version: BACKUP_VERSION,
+        createdAt: new Date().toISOString(),
+        app: 'reader-rss-import',
+        bookshelf: { books: [], groups: [] },
+        bookSources: [],
+        rssSources: parsed as RssSource[],
+        bookmarks: [],
+        replaceRules: [],
+        localState: {},
+      }
+    }
+    // Array of Book Sources
+    if (parsed.length > 0 && (parsed[0].bookSourceUrl || parsed[0].bookSourceName)) {
+      return {
+        version: BACKUP_VERSION,
+        createdAt: new Date().toISOString(),
+        app: 'reader-source-import',
+        bookshelf: { books: [], groups: [] },
+        bookSources: parsed as BookSource[],
+        rssSources: [],
+        bookmarks: [],
+        replaceRules: [],
+        localState: {},
+      }
+    }
+  }
+
   return {
-    version: payload.version || BACKUP_VERSION,
-    createdAt: payload.createdAt || new Date().toISOString(),
-    app: payload.app || 'reader-rust-frontend',
+    version: parsed.version || BACKUP_VERSION,
+    createdAt: parsed.createdAt || new Date().toISOString(),
+    app: parsed.app || 'reader-rust-frontend',
     bookshelf: {
-      books: payload.bookshelf?.books || [],
-      groups: payload.bookshelf?.groups || [],
+      books: parsed.bookshelf?.books || (Array.isArray(parsed.books) ? parsed.books : []),
+      groups: parsed.bookshelf?.groups || (Array.isArray(parsed.groups) ? parsed.groups : []),
     },
-    bookSources: payload.bookSources || [],
-    rssSources: payload.rssSources || [],
-    bookmarks: payload.bookmarks || [],
-    replaceRules: payload.replaceRules || [],
-    localState: payload.localState || {},
+    bookSources: parsed.bookSources || (Array.isArray(parsed.sources) ? parsed.sources : []),
+    rssSources: parsed.rssSources || [],
+    bookmarks: parsed.bookmarks || [],
+    replaceRules: parsed.replaceRules || [],
+    localState: parsed.localState || {},
   }
 }
 

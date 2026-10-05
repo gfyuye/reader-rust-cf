@@ -1434,7 +1434,7 @@ async function readEpubChapterHtml(bookId: string, chapterIndex: number, env: En
     });
   }
 
-  if (!payload) throw new Error("无法读取章节切片数据 (R2 与远端 WebDAV 均未命中)");
+  if (!payload) throw new Error("本地书籍不存在，请重新导入");
 
   let rawHtml = "";
   if (chapter.compression_method === 0) {
@@ -1888,7 +1888,7 @@ async function readMobiChapterText(bookId: string, chapterIndex: number, env: En
     });
   }
 
-  if (!payload) throw new Error("无法读取切片数据 (R2 与远端 WebDAV 均未命中)");
+  if (!payload) throw new Error("本地书籍不存在，请重新导入");
 
   const decompressed = chapter.compression === 2 ? decompressPalmDoc(payload) : payload;
   return decodeMobiBytes(decompressed);
@@ -3892,7 +3892,7 @@ async function readTxtChapterText(bookId: string, chapterIndex: number, env: Env
     });
   }
 
-  if (!payload) throw new Error("无法读取 TXT 章节数据 (R2 与远端 WebDAV 均未命中)");
+  if (!payload) throw new Error("本地书籍不存在，请重新导入");
   return new TextDecoder().decode(payload);
 }
 
