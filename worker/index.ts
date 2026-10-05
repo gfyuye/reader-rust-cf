@@ -2825,9 +2825,9 @@ async function handleSaveRemoteWebdav(request: Request, env: Env): Promise<Respo
     const interval = parseInt(syncIntervalMins || "5", 10) || 5;
 
     await env.DB.prepare(
-      `INSERT OR IGNORE INTO users (username, password_hash, is_admin, enable_webdav, status, created_at, updated_at)
-       VALUES (?1, '', 1, 1, 'active', ?2, ?3)`
-    ).bind(userNs, now, now).run();
+      `INSERT OR IGNORE INTO users (username, password, salt, is_admin, enable_webdav, created_at)
+       VALUES (?1, '', '', 1, 1, ?2)`
+    ).bind(userNs, now).run();
 
     const existing = await env.DB.prepare(
       `SELECT webdav_password FROM user_remote_webdav WHERE username = ?1`

@@ -17,33 +17,21 @@ import { clearRecentReadBooks, getRecentReadBookKey, loadRecentReadBooks, remove
 
 export function sortBooksByLatestReadAndName(list: Book[]): Book[] {
   if (list.length <= 1) return list.slice()
+  const copy = list.slice()
 
-  let latestIndex = -1
-  let latestTime = 0
-
-  for (let i = 0; i < list.length; i++) {
-    const t = list[i].durChapterTime || 0
-    if (t > latestTime) {
-      latestTime = t
-      latestIndex = i
+  copy.sort((a, b) => {
+    const timeA = a.durChapterTime || 0
+    const timeB = b.durChapterTime || 0
+    if (timeB !== timeA) {
+      return timeB - timeA // 排序优先级：最后阅读时间 > 文件名
     }
-  }
+    return (a.name || '').localeCompare(b.name || '', 'zh-Hans-CN', {
+      numeric: true,
+      sensitivity: 'base',
+    })
+  })
 
-  let latestBook: Book | null = null
-  let others: Book[] = []
-
-  if (latestIndex >= 0 && latestTime > 0) {
-    latestBook = list[latestIndex]
-    others = list.filter((_, idx) => idx !== latestIndex)
-  } else {
-    others = list.slice()
-  }
-
-  others.sort((a, b) =>
-    (a.name || '').localeCompare(b.name || '', 'zh-Hans-CN', { numeric: true, sensitivity: 'base' })
-  )
-
-  return latestBook ? [latestBook, ...others] : others
+  return copy
 }
 
 export const useBookshelfStore = defineStore('bookshelf', () => {
@@ -156,6 +144,16 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
         continue
       }
 
+      // Normalize "本地"
+      if (gId === -2 || gName === '本地') {
+        if (!seenNames.has('本地')) {
+          seenNames.add('本地')
+          seenIds.add(-2)
+          list.push({ ...g, groupId: -2, groupName: '本地', orderNo: order || -50, show: g.show !== false })
+        }
+        continue
+      }
+
       // Normalize "未分组"
       if (gId === -4 || gId === 0 || gName === '未分组') {
         if (!seenNames.has('未分组')) {
@@ -176,6 +174,11 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     // Ensure "全部" exists
     if (!seenNames.has('全部')) {
       list.unshift({ groupId: -1, groupName: '全部', orderNo: -100, show: true, hidden: false })
+    }
+
+    // Ensure "本地" exists
+    if (!seenNames.has('本地')) {
+      list.push({ groupId: -2, groupName: '本地', orderNo: -50, show: true, hidden: false })
     }
 
     // Ensure "未分组" exists
@@ -219,7 +222,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   }
 
   async function saveGroup(groupName: string, groupId = 0) {
-    if (groupId === -1 || groupId === -4 || groupId === 0) return groupId
+    if (groupId === -1 || groupId === -2 || groupId === -4 || groupId === 0) return groupId
     let existingGroup = groups.value.find((g) => g.groupId === groupId)
     if (groupId <= 0) {
       const existingIds = groups.value.map((g) => g.groupId).filter((id) => id > 0)
@@ -250,7 +253,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   }
 
   async function removeGroup(groupId: number) {
-    if (groupId === -1 || groupId === -4 || groupId === 0) return
+    if (groupId === -1 || groupId === -2 || groupId === -4 || groupId === 0) return
     await apiDeleteBookGroup(groupId)
     groups.value = groups.value.filter((group) => group.groupId !== groupId)
     books.value = books.value.map((book) => {

@@ -331,9 +331,9 @@ export async function restoreWebdavBackup(payload: WebdavBackupPayload) {
     }
   }
 
-  // 4. Restore Book sources in batches of 50 to prevent network/subrequest timeout on huge backups
+  // 4. Restore Book sources in batches of 150 to prevent network/subrequest timeout on huge backups
   if (payload.bookSources.length) {
-    const SOURCE_CHUNK = 50
+    const SOURCE_CHUNK = 150
     for (let i = 0; i < payload.bookSources.length; i += SOURCE_CHUNK) {
       const slice = payload.bookSources.slice(i, i + SOURCE_CHUNK)
       await saveBookSources(slice).catch((err) => {
