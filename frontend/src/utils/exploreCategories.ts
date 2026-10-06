@@ -7,6 +7,47 @@ export function parseExploreCategories(rule?: string | null): ExploreCategory[] 
   const trimmedRule = rule?.trim()
   if (!trimmedRule) return []
 
+  if (trimmedRule.startsWith('@js:')) {
+    try {
+      let code = trimmedRule.substring(4).trim()
+      code = code.replace(/(\.map\s*\()\s*(\[[^\]]+\])\s*=>/g, '$1($2) =>')
+      const fn = new Function('source', 'baseUrl', `
+        let sort = [];
+        let result = '';
+        ${code}
+        if (typeof sort !== 'undefined' && Array.isArray(sort) && sort.length > 0) {
+          if (typeof sort[0] === 'string') {
+            return "[" + sort.toString() + "]";
+          }
+          return JSON.stringify(sort);
+        }
+        return typeof result !== 'undefined' ? result : '';
+      `)
+      const evaluated = fn({ getKey: () => '' }, '')
+      if (typeof evaluated === 'string' && evaluated.trim().startsWith('[')) {
+        return parseExploreCategories(evaluated)
+      }
+    } catch {
+      // Fall through
+    }
+
+    // Regex extraction fallback for push(title, url) in @js: rules
+    const pushRegex = /push\(\s*["'`]([^"'`]+)["'`]\s*,\s*(?:["'`]([^"'`]+)["'`]|([^,)]+))/g
+    let match
+    const categories: ExploreCategory[] = []
+    while ((match = pushRegex.exec(trimmedRule)) !== null) {
+      const title = match[1].trim()
+      const rawUrl = (match[2] || match[3] || '').trim()
+      if (title && rawUrl && rawUrl !== 'null' && rawUrl !== 'undefined') {
+        const cleanUrl = rawUrl.replace(/^["'`]|["'`]$/g, '').trim()
+        if (cleanUrl.startsWith('http') || cleanUrl.startsWith('/')) {
+          categories.push({ title, url: cleanUrl })
+        }
+      }
+    }
+    if (categories.length > 0) return categories
+  }
+
   try {
     if (trimmedRule.startsWith('[')) {
       const parsed = JSON.parse(normalizeRelaxedExploreJson(trimmedRule))
