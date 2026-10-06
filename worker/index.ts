@@ -768,32 +768,74 @@ async function handleSaveBookProgress(request: Request, env: Env, ctx: Execution
   return jsonResponse({ isSuccess: true, data: "进度已同步" });
 }
 
-function getDynamicHeaders(source: any): Record<string, string> {
-  const headers: Record<string, string> = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  };
+async function fetchTextWithEncoding(resp: Response): Promise<string> {
+  const buf = await resp.arrayBuffer();
+  const contentType = resp.headers.get("content-type") || "";
 
-  if (!source?.header) return headers;
+  const charsetMatch = contentType.match(/charset=([a-zA-Z0-9_-]+)/i);
+  let charset = charsetMatch ? charsetMatch[1].toLowerCase() : "";
 
-  const hdr = String(source.header).trim();
-  if (hdr.startsWith("@js:") || hdr.includes("java.md5Encode")) {
+  if (!charset) {
+    const peek = new TextDecoder("ascii").decode(buf.slice(0, 1024));
+    const metaMatch = peek.match(/charset=["']?([a-zA-Z0-9_-]+)/i);
+    if (metaMatch) charset = metaMatch[1].toLowerCase();
+  }
+
+  if (charset === "gbk" || charset === "gb2312" || charset === "gb18030") {
     try {
-      const ts = Math.round(Date.now() / 1000);
-      const pkgMatch = hdr.match(/package\s*=\s*["']([^"']+)["']/);
-      const pkg = pkgMatch ? pkgMatch[1] : "com.xxyuedu.chasingbooks";
-      const signStr = `${pkg}1${ts}vhjJVz1St6tK7!8n#B0MqRIuE2Dh7!C#`;
-      const sign = md5(signStr);
-      headers["pt"] = "1";
-      headers["time"] = String(ts);
-      headers["sign"] = sign;
-      headers["package"] = pkg;
-      headers["User-Agent"] = `Mozilla/5.0 (iPhone; CPU iPhone OS 7_1_2 like Mac OS X) AppleWebKit/537.51.2 (KHTML, like Gecko) Version/7.0 Mobile/11D167 Safari/9537.53_${pkg}`;
-    } catch {}
-  } else {
-    try {
-      Object.assign(headers, JSON.parse(hdr));
+      return new TextDecoder("gb18030").decode(buf);
     } catch {}
   }
+
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(buf);
+  } catch {
+    try {
+      return new TextDecoder("gb18030").decode(buf);
+    } catch {
+      return new TextDecoder().decode(buf);
+    }
+  }
+}
+
+function getDynamicHeaders(source: any, targetUrl = ""): Record<string, string> {
+  let domain = "";
+  try {
+    const u = targetUrl || source?.bookSourceUrl || "";
+    if (u) domain = new URL(u).origin;
+  } catch {}
+
+  const headers: Record<string, string> = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+  };
+  if (domain) {
+    headers["Referer"] = `${domain}/`;
+  }
+
+  const isXiaoXiao = (targetUrl && targetUrl.includes("chuangke.tv")) || (source?.bookSourceUrl || "").includes("chuangke.tv");
+  if (isXiaoXiao) {
+    const pkg = "com.xxyuedu.chasingbooks";
+    const ts = Math.round(Date.now() / 1000);
+    const sign = md5(`${pkg}1${ts}vhjJVz1St6tK7!8n#B0MqRIuE2Dh7!C#`);
+    headers["pt"] = "1";
+    headers["time"] = String(ts);
+    headers["sign"] = sign;
+    headers["package"] = pkg;
+    headers["User-Agent"] = `Mozilla/5.0 (iPhone; CPU iPhone OS 7_1_2 like Mac OS X) AppleWebKit/537.51.2 (KHTML, like Gecko) Version/7.0 Mobile/11D167 Safari/9537.53_${pkg}`;
+    return headers;
+  }
+
+  if (source?.header) {
+    const hdr = String(source.header).trim();
+    if (!hdr.startsWith("@js:")) {
+      try {
+        Object.assign(headers, JSON.parse(hdr));
+      } catch {}
+    }
+  }
+
   return headers;
 }
 
@@ -934,10 +976,6 @@ async function handleGetBookContent(request: Request, env: Env): Promise<Respons
     }
 
     let reqUrl = chapterUrl;
-    let fetchOpts: RequestInit = {
-      headers: getDynamicHeaders(source),
-    };
-
     if (chapterUrl.includes(",{") || chapterUrl.includes(", {")) {
       const idx = chapterUrl.indexOf(",{") !== -1 ? chapterUrl.indexOf(",{") : chapterUrl.indexOf(", {");
       try {
@@ -954,8 +992,10 @@ async function handleGetBookContent(request: Request, env: Env): Promise<Respons
       } catch {}
     }
 
+    fetchOpts.headers = getDynamicHeaders(source, reqUrl);
+
     const resp = await fetch(reqUrl, fetchOpts);
-    const raw = await resp.text();
+    const raw = await fetchTextWithEncoding(resp);
 
     if (raw.trim().startsWith("{") || raw.trim().startsWith("[")) {
       try {
@@ -983,6 +1023,15 @@ async function handleGetBookContent(request: Request, env: Env): Promise<Respons
           return jsonResponse({ isSuccess: true, data: contentVal });
         }
       } catch {}
+    }
+
+    // HTML response: extract body content from standard content containers
+    const contentMatch =
+      raw.match(/<div[^>]+(?:id|class)=["'][^"']*(?:novelcontent|read-content|chapter-content|content)[^"']*["'][^>]*>([\s\S]*?)<\/div>/i) ||
+      raw.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
+
+    if (contentMatch) {
+      return jsonResponse({ isSuccess: true, data: contentMatch[1] });
     }
 
     return jsonResponse({ isSuccess: true, data: raw });
@@ -4888,7 +4937,7 @@ async function handleGetChapterList(request: Request, env: Env): Promise<Respons
 
     const resp = await fetch(reqUrl, { headers: fetchHeaders, signal: AbortSignal.timeout(10000) });
     if (!resp.ok) return jsonResponse({ isSuccess: true, data: [] });
-    const text = await resp.text();
+    const text = await fetchTextWithEncoding(resp);
     const chapters = await parseSourceChapterList(text, source, reqUrl);
     return jsonResponse({ isSuccess: true, data: chapters });
   } catch (err: any) {
@@ -4919,7 +4968,7 @@ async function parseSourceChapterList(text: string, source: any, targetUrl: stri
               sitePath = decoded.site_path;
             } else {
               const sourceUrl = targetUrl.replace("/details/", "/source/");
-              const sResp = await fetch(sourceUrl, { headers: getDynamicHeaders(source) });
+              const sResp = await fetch(sourceUrl, { headers: getDynamicHeaders(source, sourceUrl) });
               if (sResp.ok) {
                 const sJson = await sResp.json<any>();
                 if (sJson.data?.content) {
@@ -4933,7 +4982,7 @@ async function parseSourceChapterList(text: string, source: any, targetUrl: stri
 
             if (sitePath) {
               const catalogUrl = `https://catalog.chuangke.tv/${sitePath}`;
-              const cResp = await fetch(catalogUrl, { headers: getDynamicHeaders(source) });
+              const cResp = await fetch(catalogUrl, { headers: getDynamicHeaders(source, catalogUrl) });
               if (cResp.ok) {
                 j = await cResp.json();
               }
@@ -4980,14 +5029,48 @@ async function parseSourceChapterList(text: string, source: any, targetUrl: stri
   const linkRegex = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   let match;
   let idx = 0;
+  const seenUrls = new Set<string>();
+
+  const ignorePatterns = [
+    /\/author\//i,
+    /\/rank/i,
+    /\/month/i,
+    /\/down/i,
+    /\/tag/i,
+    /\/css/i,
+    /\/login/i,
+    /\/register/i,
+    /\/look_/i,
+    /\/re_/i,
+    /\/sr_/i,
+    /\.(css|js|png|jpg|jpeg|gif|ico)(\?|$)/i,
+  ];
+
   while ((match = linkRegex.exec(text)) !== null) {
     let href = match[1].trim();
     const rawText = match[2].replace(/<[^>]+>/g, "").trim();
 
-    if (rawText && rawText.length <= 50 && (rawText.includes("第") || rawText.includes("章") || rawText.includes("回") || href.includes("chapter") || href.includes("read") || /\d+\.html/.test(href))) {
-      if (href.startsWith("/")) href = `${baseDomain}${href}`;
-      else if (!href.startsWith("http")) href = `${baseDomain}/${href}`;
+    if (!rawText || rawText.length > 60 || rawText.length < 2) continue;
+    if (ignorePatterns.some((p) => p.test(href))) continue;
 
+    if (href.startsWith("//")) {
+      href = `${new URL(baseDomain).protocol}${href}`;
+    } else if (href.startsWith("/")) {
+      href = `${baseDomain}${href}`;
+    } else if (!href.startsWith("http")) {
+      href = `${baseDomain}/${href}`;
+    }
+
+    if (seenUrls.has(href)) continue;
+
+    const isChapter =
+      /第\s*[0-9一二三四五六七八九十百千万0-9]+\s*[章回节卷集幕篇部]/.test(rawText) ||
+      /_\d+\.html/i.test(href) ||
+      /\/\d+\.html/i.test(href) ||
+      /chapter|read/i.test(href);
+
+    if (isChapter) {
+      seenUrls.add(href);
       chapters.push({
         index: idx++,
         title: rawText,
