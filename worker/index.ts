@@ -4766,124 +4766,133 @@ async function handleGetBookInfo(request: Request, env: Env): Promise<Response> 
 }
 
 async function handleGetChapterList(request: Request, env: Env): Promise<Response> {
-  const userNs = await resolveUserNs(request, env);
-  if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
-
-  let bookUrl = new URL(request.url).searchParams.get("bookUrl") || "";
-  let tocUrl = new URL(request.url).searchParams.get("tocUrl") || "";
-  let bookName = "";
-  if (request.method === "POST") {
-    try {
-      const body = await request.json<any>();
-      bookUrl = body.bookUrl || bookUrl;
-      tocUrl = body.tocUrl || tocUrl;
-      bookName = (body.name || "").trim();
-    } catch {}
-  }
-
-  const targetUrl = bookUrl || tocUrl;
-  const cleanTarget = decodeURIComponent(targetUrl);
-  const fileNameCandidate = cleanTarget.split("/").pop()?.split("#")[0]?.trim() || "";
-
-  // 1. Local TXT Chapters
-  if (targetUrl.startsWith("local-txt:") || cleanTarget.toLowerCase().includes(".txt")) {
-    let bookId = targetUrl.startsWith("local-txt:") ? targetUrl.split(":")[1].split("#")[0] : "";
-    if (!bookId) {
-      const row = await env.DB.prepare(
-        `SELECT book_id FROM txt_books WHERE user_ns = ?1 AND (file_name = ?2 OR title = ?3) LIMIT 1`
-      ).bind(userNs, fileNameCandidate, bookName).first<{ book_id: string }>();
-      bookId = row?.book_id || "";
-    }
-
-    if (bookId) {
-      const rows = await env.DB.prepare(
-        `SELECT chapter_index, title FROM txt_chapters WHERE book_id = ?1 ORDER BY chapter_index ASC`
-      ).bind(bookId).all<{ chapter_index: number; title: string }>();
-
-      if (rows.results && rows.results.length > 0) {
-        const chapters = rows.results.map((r) => ({
-          index: r.chapter_index,
-          title: r.title,
-          url: `local-txt:${bookId}#${r.chapter_index}`,
-        }));
-        return jsonResponse({ isSuccess: true, data: chapters });
-      }
-    }
-    return jsonResponse({ isSuccess: false, errorMsg: "书籍不存在，请重新上传" });
-  }
-
-  // 2. Local EPUB Chapters
-  if (targetUrl.startsWith("local-epub:") || cleanTarget.toLowerCase().includes(".epub")) {
-    let bookId = targetUrl.startsWith("local-epub:") ? targetUrl.split(":")[1].split("#")[0] : "";
-    if (!bookId) {
-      const row = await env.DB.prepare(
-        `SELECT book_id FROM epub_books WHERE user_ns = ?1 AND (file_name = ?2 OR title = ?3) LIMIT 1`
-      ).bind(userNs, fileNameCandidate, bookName).first<{ book_id: string }>();
-      bookId = row?.book_id || "";
-    }
-
-    if (bookId) {
-      const rows = await env.DB.prepare(
-        `SELECT chapter_index, title FROM epub_chapters WHERE book_id = ?1 ORDER BY chapter_index ASC`
-      ).bind(bookId).all<{ chapter_index: number; title: string }>();
-
-      if (rows.results && rows.results.length > 0) {
-        const chapters = rows.results.map((r) => ({
-          index: r.chapter_index,
-          title: r.title,
-          url: `local-epub:${bookId}#${r.chapter_index}`,
-        }));
-        return jsonResponse({ isSuccess: true, data: chapters });
-      }
-    }
-    return jsonResponse({ isSuccess: false, errorMsg: "书籍不存在，请重新上传" });
-  }
-
-  // 3. Local PDF Pages
-  if (targetUrl.startsWith("local-pdf:") || cleanTarget.toLowerCase().includes(".pdf")) {
-    let bookId = targetUrl.startsWith("local-pdf:") ? targetUrl.split(":")[1]?.split("#")[0] : "";
-    if (!bookId) {
-      const row = await env.DB.prepare(
-        `SELECT book_id FROM pdf_books WHERE user_ns = ?1 AND (file_name = ?2 OR title = ?3) LIMIT 1`
-      ).bind(userNs, fileNameCandidate, bookName).first<{ book_id: string }>();
-      bookId = row?.book_id || "";
-    }
-
-    if (bookId) {
-      const book = await env.DB.prepare(`SELECT total_pages FROM pdf_books WHERE book_id = ?1`).bind(bookId).first<{ total_pages: number }>();
-      const count = Math.max(1, book?.total_pages || 1);
-      const chapters = Array.from({ length: count }, (_, i) => ({
-        index: i,
-        title: `第 ${i + 1} 页`,
-        url: `local-pdf:${bookId}#${i}`,
-      }));
-      return jsonResponse({ isSuccess: true, data: chapters });
-    }
-    return jsonResponse({ isSuccess: false, errorMsg: "书籍不存在，请重新上传" });
-  }
-
-  // 4. Online Book Source Chapters
-  let bookSourceUrl = (body.bookSourceUrl || "").trim();
-  let source: any = null;
-  if (bookSourceUrl) {
-    const sRow = await env.DB.prepare(
-      `SELECT json FROM book_sources WHERE user_ns = ?1 AND book_source_url = ?2`
-    ).bind(userNs, bookSourceUrl).first<{ json: string }>();
-    if (sRow) {
-      try { source = JSON.parse(sRow.json); } catch {}
-    }
-  }
-
-  let reqUrl = targetUrl;
-  let fetchHeaders = getDynamicHeaders(source);
-
   try {
+    const userNs = await resolveUserNs(request, env);
+    if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
+
+    let bookUrl = new URL(request.url).searchParams.get("bookUrl") || "";
+    let tocUrl = new URL(request.url).searchParams.get("tocUrl") || "";
+    let bookName = "";
+    let body: any = {};
+    if (request.method === "POST") {
+      try {
+        body = await request.json<any>();
+        bookUrl = body.bookUrl || bookUrl;
+        tocUrl = body.tocUrl || tocUrl;
+        bookName = (body.name || "").trim();
+      } catch {}
+    }
+
+    const targetUrl = bookUrl || tocUrl;
+    const cleanTarget = decodeURIComponent(targetUrl);
+    const fileNameCandidate = cleanTarget.split("/").pop()?.split("#")[0]?.trim() || "";
+
+    // 1. Local TXT Chapters
+    if (targetUrl.startsWith("local-txt:") || cleanTarget.toLowerCase().includes(".txt")) {
+      let bookId = targetUrl.startsWith("local-txt:") ? targetUrl.split(":")[1].split("#")[0] : "";
+      if (!bookId) {
+        const row = await env.DB.prepare(
+          `SELECT book_id FROM txt_books WHERE user_ns = ?1 AND (file_name = ?2 OR title = ?3) LIMIT 1`
+        ).bind(userNs, fileNameCandidate, bookName).first<{ book_id: string }>();
+        bookId = row?.book_id || "";
+      }
+
+      if (bookId) {
+        const rows = await env.DB.prepare(
+          `SELECT chapter_index, title FROM txt_chapters WHERE book_id = ?1 ORDER BY chapter_index ASC`
+        ).bind(bookId).all<{ chapter_index: number; title: string }>();
+
+        if (rows.results && rows.results.length > 0) {
+          const chapters = rows.results.map((r) => ({
+            index: r.chapter_index,
+            title: r.title,
+            url: `local-txt:${bookId}#${r.chapter_index}`,
+          }));
+          return jsonResponse({ isSuccess: true, data: chapters });
+        }
+      }
+      return jsonResponse({ isSuccess: false, errorMsg: "书籍不存在，请重新上传" });
+    }
+
+    // 2. Local EPUB Chapters
+    if (targetUrl.startsWith("local-epub:") || cleanTarget.toLowerCase().includes(".epub")) {
+      let bookId = targetUrl.startsWith("local-epub:") ? targetUrl.split(":")[1].split("#")[0] : "";
+      if (!bookId) {
+        const row = await env.DB.prepare(
+          `SELECT book_id FROM epub_books WHERE user_ns = ?1 AND (file_name = ?2 OR title = ?3) LIMIT 1`
+        ).bind(userNs, fileNameCandidate, bookName).first<{ book_id: string }>();
+        bookId = row?.book_id || "";
+      }
+
+      if (bookId) {
+        const rows = await env.DB.prepare(
+          `SELECT chapter_index, title FROM epub_chapters WHERE book_id = ?1 ORDER BY chapter_index ASC`
+        ).bind(bookId).all<{ chapter_index: number; title: string }>();
+
+        if (rows.results && rows.results.length > 0) {
+          const chapters = rows.results.map((r) => ({
+            index: r.chapter_index,
+            title: r.title,
+            url: `local-epub:${bookId}#${r.chapter_index}`,
+          }));
+          return jsonResponse({ isSuccess: true, data: chapters });
+        }
+      }
+      return jsonResponse({ isSuccess: false, errorMsg: "书籍不存在，请重新上传" });
+    }
+
+    // 3. Local PDF Pages
+    if (targetUrl.startsWith("local-pdf:") || cleanTarget.toLowerCase().includes(".pdf")) {
+      let bookId = targetUrl.startsWith("local-pdf:") ? targetUrl.split(":")[1]?.split("#")[0] : "";
+      if (!bookId) {
+        const row = await env.DB.prepare(
+          `SELECT book_id FROM pdf_books WHERE user_ns = ?1 AND (file_name = ?2 OR title = ?3) LIMIT 1`
+        ).bind(userNs, fileNameCandidate, bookName).first<{ book_id: string }>();
+        bookId = row?.book_id || "";
+      }
+
+      if (bookId) {
+        const book = await env.DB.prepare(`SELECT total_pages FROM pdf_books WHERE book_id = ?1`).bind(bookId).first<{ total_pages: number }>();
+        const count = Math.max(1, book?.total_pages || 1);
+        const chapters = Array.from({ length: count }, (_, i) => ({
+          index: i,
+          title: `第 ${i + 1} 页`,
+          url: `local-pdf:${bookId}#${i}`,
+        }));
+        return jsonResponse({ isSuccess: true, data: chapters });
+      }
+      return jsonResponse({ isSuccess: false, errorMsg: "书籍不存在，请重新上传" });
+    }
+
+    // 4. Online Book Source Chapters
+    let bookSourceUrl = (body.bookSourceUrl || "").trim();
+    let source: any = null;
+    if (bookSourceUrl) {
+      const sRow = await env.DB.prepare(
+        `SELECT json FROM book_sources WHERE user_ns = ?1 AND book_source_url = ?2`
+      ).bind(userNs, bookSourceUrl).first<{ json: string }>();
+      if (sRow) {
+        try { source = JSON.parse(sRow.json); } catch {}
+      }
+    }
+
+    let reqUrl = targetUrl;
+    if (reqUrl.startsWith("/")) {
+      reqUrl = `${source?.bookSourceUrl || ""}${reqUrl}`;
+    }
+    if (!reqUrl.startsWith("http")) {
+      return jsonResponse({ isSuccess: true, data: [] });
+    }
+
+    let fetchHeaders = getDynamicHeaders(source);
+
     const resp = await fetch(reqUrl, { headers: fetchHeaders, signal: AbortSignal.timeout(10000) });
     if (!resp.ok) return jsonResponse({ isSuccess: true, data: [] });
     const text = await resp.text();
     const chapters = await parseSourceChapterList(text, source, reqUrl);
     return jsonResponse({ isSuccess: true, data: chapters });
   } catch (err: any) {
+    console.error("handleGetChapterList error:", err);
     return jsonResponse({ isSuccess: false, errorMsg: err.message || "获取目录失败" });
   }
 }
