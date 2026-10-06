@@ -551,10 +551,7 @@ function deduplicateChapterTitle(wrapper: HTMLElement, chapterTitle?: string) {
       /^第[0-9一二三四五六七八九十百千万]+[章回节卷集幕篇部]/.test(text) && text.length <= 40
 
     if (matchesTitle || isChapterHeadingPattern) {
-      const parent = el.parentElement
-      if (parent && parent !== wrapper && parent.children.length === 1 && !parent.querySelector('img')) {
-        parent.remove()
-      } else {
+      if (wrapper.children.length > 1) {
         el.remove()
       }
       break

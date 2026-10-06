@@ -768,6 +768,35 @@ async function handleSaveBookProgress(request: Request, env: Env, ctx: Execution
   return jsonResponse({ isSuccess: true, data: "进度已同步" });
 }
 
+function getDynamicHeaders(source: any): Record<string, string> {
+  const headers: Record<string, string> = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  };
+
+  if (!source?.header) return headers;
+
+  const hdr = String(source.header).trim();
+  if (hdr.startsWith("@js:") || hdr.includes("java.md5Encode")) {
+    try {
+      const ts = Math.round(Date.now() / 1000);
+      const pkgMatch = hdr.match(/package\s*=\s*["']([^"']+)["']/);
+      const pkg = pkgMatch ? pkgMatch[1] : "com.xxyuedu.chasingbooks";
+      const signStr = `${pkg}1${ts}vhjJVz1St6tK7!8n#B0MqRIuE2Dh7!C#`;
+      const sign = md5(signStr);
+      headers["pt"] = "1";
+      headers["time"] = String(ts);
+      headers["sign"] = sign;
+      headers["package"] = pkg;
+      headers["User-Agent"] = `Mozilla/5.0 (iPhone; CPU iPhone OS 7_1_2 like Mac OS X) AppleWebKit/537.51.2 (KHTML, like Gecko) Version/7.0 Mobile/11D167 Safari/9537.53_${pkg}`;
+    } catch {}
+  } else {
+    try {
+      Object.assign(headers, JSON.parse(hdr));
+    } catch {}
+  }
+  return headers;
+}
+
 // ==========================================
 // 4. Unified Chapter Content Router
 // ==========================================
@@ -778,18 +807,21 @@ async function handleGetBookContent(request: Request, env: Env): Promise<Respons
 
   let chapterUrl = "";
   let bookUrl = "";
+  let bookSourceUrl = "";
   let index = 0;
 
   const url = new URL(request.url);
   chapterUrl = url.searchParams.get("url") || url.searchParams.get("chapterUrl") || "";
   bookUrl = url.searchParams.get("bookUrl") || "";
+  bookSourceUrl = url.searchParams.get("bookSourceUrl") || "";
   index = parseInt(url.searchParams.get("index") || "0", 10);
 
   if (request.method === "POST") {
     try {
-      const body = await request.json<any>();
+      const body = await request.clone().json<any>();
       chapterUrl = body.chapterUrl || body.url || chapterUrl;
-      bookUrl = body.bookUrl || bookUrl;
+      bookUrl = body.bookUrl || body.url || bookUrl;
+      bookSourceUrl = body.bookSourceUrl || body.origin || bookSourceUrl;
       if (body.index !== undefined) {
         index = parseInt(body.index, 10);
       }
@@ -891,9 +923,19 @@ async function handleGetBookContent(request: Request, env: Env): Promise<Respons
     }
 
     // 3. Direct HTTP fetch fallback
+    let source: any = null;
+    if (bookSourceUrl) {
+      const sRow = await env.DB.prepare(
+        `SELECT json FROM book_sources WHERE user_ns = ?1 AND book_source_url = ?2`
+      ).bind(userNs, bookSourceUrl).first<{ json: string }>();
+      if (sRow) {
+        try { source = JSON.parse(sRow.json); } catch {}
+      }
+    }
+
     let reqUrl = chapterUrl;
     let fetchOpts: RequestInit = {
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+      headers: getDynamicHeaders(source),
     };
 
     if (chapterUrl.includes(",{") || chapterUrl.includes(", {")) {
@@ -4505,31 +4547,7 @@ async function searchSingleSource(source: any, key: string, page: number, env: E
 
     if (!isSafeRemoteUrl(targetUrl)) return [];
 
-    const headers: Record<string, string> = {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    };
-
-    if (source.header) {
-      const hdr = String(source.header).trim();
-      if (hdr.startsWith("@js:") || hdr.includes("java.md5Encode")) {
-        try {
-          const ts = Math.round(Date.now() / 1000);
-          const pkgMatch = hdr.match(/package\s*=\s*["']([^"']+)["']/);
-          const pkg = pkgMatch ? pkgMatch[1] : "com.xxyuedu.chasingbooks";
-          const signStr = `${pkg}1${ts}vhjJVz1St6tK7!8n#B0MqRIuE2Dh7!C#`;
-          const sign = md5(signStr);
-          headers["pt"] = "1";
-          headers["time"] = String(ts);
-          headers["sign"] = sign;
-          headers["package"] = pkg;
-          headers["User-Agent"] = `Mozilla/5.0 (iPhone; CPU iPhone OS 7_1_2 like Mac OS X) AppleWebKit/537.51.2 (KHTML, like Gecko) Version/7.0 Mobile/11D167 Safari/9537.53_${pkg}`;
-        } catch {}
-      } else {
-        try {
-          Object.assign(headers, JSON.parse(source.header));
-        } catch {}
-      }
-    }
+    const headers = getDynamicHeaders(source);
 
     const fetchOptions: RequestInit = {
       headers,
