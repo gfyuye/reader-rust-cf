@@ -4862,7 +4862,132 @@ async function handleGetChapterList(request: Request, env: Env): Promise<Respons
     return jsonResponse({ isSuccess: false, errorMsg: "书籍不存在，请重新上传" });
   }
 
-  return jsonResponse({ isSuccess: true, data: [] });
+  // 4. Online Book Source Chapters
+  let bookSourceUrl = (body.bookSourceUrl || "").trim();
+  let source: any = null;
+  if (bookSourceUrl) {
+    const sRow = await env.DB.prepare(
+      `SELECT json FROM book_sources WHERE user_ns = ?1 AND book_source_url = ?2`
+    ).bind(userNs, bookSourceUrl).first<{ json: string }>();
+    if (sRow) {
+      try { source = JSON.parse(sRow.json); } catch {}
+    }
+  }
+
+  let reqUrl = targetUrl;
+  let fetchHeaders = getDynamicHeaders(source);
+
+  try {
+    const resp = await fetch(reqUrl, { headers: fetchHeaders, signal: AbortSignal.timeout(10000) });
+    if (!resp.ok) return jsonResponse({ isSuccess: true, data: [] });
+    const text = await resp.text();
+    const chapters = await parseSourceChapterList(text, source, reqUrl);
+    return jsonResponse({ isSuccess: true, data: chapters });
+  } catch (err: any) {
+    return jsonResponse({ isSuccess: false, errorMsg: err.message || "获取目录失败" });
+  }
+}
+
+async function parseSourceChapterList(text: string, source: any, targetUrl: string): Promise<any[]> {
+  const chapters: any[] = [];
+  const baseDomain = new URL(targetUrl).origin;
+
+  // 1. JSON response handling
+  if (text.trim().startsWith("{") || text.trim().startsWith("[")) {
+    try {
+      let j = JSON.parse(text);
+
+      // Check XiaoXiao multiple source details
+      if (targetUrl.includes("/book/details/") || targetUrl.includes("/book/source/")) {
+        let contentB64 = j.data?.content || j.content;
+        if (contentB64) {
+          try {
+            const decoded = await decodeXiaoXiao(contentB64);
+            let sitePath = "";
+            if (Array.isArray(decoded) && decoded[0]?.site_path) {
+              sitePath = decoded[0].site_path;
+            } else if (decoded.site_path) {
+              sitePath = decoded.site_path;
+            } else {
+              const sourceUrl = targetUrl.replace("/details/", "/source/");
+              const sResp = await fetch(sourceUrl, { headers: getDynamicHeaders(source) });
+              if (sResp.ok) {
+                const sJson = await sResp.json<any>();
+                if (sJson.data?.content) {
+                  const sDecoded = await decodeXiaoXiao(sJson.data.content);
+                  if (Array.isArray(sDecoded) && sDecoded[0]?.site_path) {
+                    sitePath = sDecoded[0].site_path;
+                  }
+                }
+              }
+            }
+
+            if (sitePath) {
+              const catalogUrl = `https://catalog.chuangke.tv/${sitePath}`;
+              const cResp = await fetch(catalogUrl, { headers: getDynamicHeaders(source) });
+              if (cResp.ok) {
+                j = await cResp.json();
+              }
+            }
+          } catch {}
+        }
+      }
+
+      const rawList = j.data?.chapters || j.chapters || j.data?.list || j.list || (Array.isArray(j.data) ? j.data : Array.isArray(j) ? j : []);
+      if (Array.isArray(rawList)) {
+        for (let idx = 0; idx < rawList.length; idx++) {
+          const ch = rawList[idx];
+          let title = ch.name || ch.title || ch.chapterName || `第 ${idx + 1} 章`;
+          if (title.length > 20 && /^[A-Za-z0-9+/=]+$/.test(title)) {
+            try {
+              title = await decryptAes128Cbc(title, "Pxga!h*e4@T8xfOm", "E&z!EHGLd$fli*8R");
+            } catch {}
+          }
+
+          let url = ch.url || ch.link || ch.path || "";
+          if (ch.id && (targetUrl.includes("5006") || (source?.bookSourceUrl || "").includes("5006"))) {
+            const bid = j.data?.book_id || j.book_id || j.data?.bookId || "";
+            url = `${source?.bookSourceUrl || "http://119.45.176.116:5006"}/chapterContent,{"body":{"book_id":${bid},"chapterIdList":"${ch.id},"},"method":"POST"}`;
+          } else if (url && !url.startsWith("http")) {
+            if (url.includes(".html") && (source?.bookSourceUrl || "").includes("chuangke")) {
+              url = `https://chapter.chuangke.tv/${url.replace(/^\/+/, "")}`;
+            } else {
+              url = `${baseDomain}/${url.replace(/^\/+/, "")}`;
+            }
+          }
+
+          chapters.push({
+            index: idx,
+            title,
+            url,
+          });
+        }
+        if (chapters.length > 0) return chapters;
+      }
+    } catch {}
+  }
+
+  // 2. HTML response handling: extract chapter links
+  const linkRegex = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let match;
+  let idx = 0;
+  while ((match = linkRegex.exec(text)) !== null) {
+    let href = match[1].trim();
+    const rawText = match[2].replace(/<[^>]+>/g, "").trim();
+
+    if (rawText && rawText.length <= 50 && (rawText.includes("第") || rawText.includes("章") || rawText.includes("回") || href.includes("chapter") || href.includes("read") || /\d+\.html/.test(href))) {
+      if (href.startsWith("/")) href = `${baseDomain}${href}`;
+      else if (!href.startsWith("http")) href = `${baseDomain}/${href}`;
+
+      chapters.push({
+        index: idx++,
+        title: rawText,
+        url: href,
+      });
+    }
+  }
+
+  return chapters;
 }
 
 async function handleSaveBookGroupId(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
