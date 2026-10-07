@@ -844,31 +844,32 @@ function getDynamicHeaders(source: any, targetUrl = ""): Record<string, string> 
 // ==========================================
 
 async function handleGetBookContent(request: Request, env: Env): Promise<Response> {
-  const userNs = await resolveUserNs(request, env);
-  if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
+  try {
+    const userNs = await resolveUserNs(request, env);
+    if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
-  let chapterUrl = "";
-  let bookUrl = "";
-  let bookSourceUrl = "";
-  let index = 0;
+    let chapterUrl = "";
+    let bookUrl = "";
+    let bookSourceUrl = "";
+    let index = 0;
 
-  const url = new URL(request.url);
-  chapterUrl = url.searchParams.get("url") || url.searchParams.get("chapterUrl") || "";
-  bookUrl = url.searchParams.get("bookUrl") || "";
-  bookSourceUrl = url.searchParams.get("bookSourceUrl") || "";
-  index = parseInt(url.searchParams.get("index") || "0", 10);
+    const url = new URL(request.url);
+    chapterUrl = url.searchParams.get("url") || url.searchParams.get("chapterUrl") || "";
+    bookUrl = url.searchParams.get("bookUrl") || "";
+    bookSourceUrl = url.searchParams.get("bookSourceUrl") || "";
+    index = parseInt(url.searchParams.get("index") || "0", 10);
 
-  if (request.method === "POST") {
-    try {
-      const body = await request.clone().json<any>();
-      chapterUrl = body.chapterUrl || body.url || chapterUrl;
-      bookUrl = body.bookUrl || body.url || bookUrl;
-      bookSourceUrl = body.bookSourceUrl || body.origin || bookSourceUrl;
-      if (body.index !== undefined) {
-        index = parseInt(body.index, 10);
-      }
-    } catch {}
-  }
+    if (request.method === "POST") {
+      try {
+        const body = await request.clone().json<any>();
+        chapterUrl = body.chapterUrl || body.url || chapterUrl;
+        bookUrl = body.bookUrl || body.url || bookUrl;
+        bookSourceUrl = body.bookSourceUrl || body.origin || bookSourceUrl;
+        if (body.index !== undefined) {
+          index = parseInt(body.index, 10);
+        }
+      } catch {}
+    }
 
   // Extract index from #anchor if present
   if (chapterUrl.includes("#")) {
@@ -976,6 +977,9 @@ async function handleGetBookContent(request: Request, env: Env): Promise<Respons
     }
 
     let reqUrl = chapterUrl;
+    let fetchOpts: RequestInit = {
+      headers: {},
+    };
     if (chapterUrl.includes(",{") || chapterUrl.includes(", {")) {
       const idx = chapterUrl.indexOf(",{") !== -1 ? chapterUrl.indexOf(",{") : chapterUrl.indexOf(", {");
       try {
@@ -1047,7 +1051,11 @@ async function handleGetBookContent(request: Request, env: Env): Promise<Respons
     }
   }
 
-  return jsonResponse({ isSuccess: false, errorMsg: "未识别的书籍格式" });
+    return jsonResponse({ isSuccess: false, errorMsg: "未识别的书籍格式" });
+  } catch (err: any) {
+    console.error("handleGetBookContent error:", err);
+    return jsonResponse({ isSuccess: false, errorMsg: err.message || "读取章节正文失败" });
+  }
 }
 
 async function decryptAes128Cbc(base64Cipher: string, keyStr: string, ivStr: string): Promise<string> {
