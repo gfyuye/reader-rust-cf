@@ -810,7 +810,8 @@ function getDynamicHeaders(source: any, targetUrl = ""): Record<string, string> 
     "Accept": "text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8",
     "Accept-Language": "zh-CN,zh;q=0.9",
   };
-  if (domain) {
+  const isIp = /^https?:\/\/\d+\.\d+\.\d+\.\d+/.test(targetUrl);
+  if (domain && !isIp) {
     headers["Referer"] = `${domain}/`;
   }
 
@@ -996,7 +997,14 @@ async function handleGetBookContent(request: Request, env: Env): Promise<Respons
       } catch {}
     }
 
-    fetchOpts.headers = getDynamicHeaders(source, reqUrl);
+    const dynamicHeaders = getDynamicHeaders(source, reqUrl);
+    fetchOpts.headers = {
+      ...dynamicHeaders,
+      ...(fetchOpts.headers as Record<string, string>),
+    };
+    if (fetchOpts.body && !(fetchOpts.headers as any)["Content-Type"]) {
+      (fetchOpts.headers as any)["Content-Type"] = "application/json";
+    }
 
     try {
       const resp = await fetch(reqUrl, fetchOpts);
