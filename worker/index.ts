@@ -5022,20 +5022,25 @@ async function parseSourceChapterList(text: string, source: any, targetUrl: stri
         for (let idx = 0; idx < rawList.length; idx++) {
           const ch = rawList[idx];
           let title = ch.name || ch.title || ch.chapterName || `第 ${idx + 1} 章`;
-          if (title.length > 20 && /^[A-Za-z0-9+/=]+$/.test(title)) {
+          if (title.length > 20 && /^[A-Za-z0-9+/=_-]+$/.test(title)) {
             try {
-              title = await decryptAes128Cbc(title, "Pxga!h*e4@T8xfOm", "E&z!EHGLd$fli*8R");
+              let padTitle = title.replace(/-/g, "+").replace(/_/g, "/");
+              while (padTitle.length % 4 !== 0) padTitle += "=";
+              title = await decryptAes128Cbc(padTitle, "Pxga!h*e4@T8xfOm", "E&z!EHGLd$fli*8R");
             } catch {}
           }
 
-          let url = ch.url || ch.link || ch.path || "";
-          if (ch.id && (targetUrl.includes("5006") || (source?.bookSourceUrl || "").includes("5006"))) {
+          let url = "";
+          if (ch.path && ((source?.bookSourceUrl || "").includes("chuangke") || targetUrl.includes("chuangke"))) {
+            url = `https://chapter.chuangke.tv/${ch.path.replace(/^\/+/, "")}`;
+          } else if (ch.id && (targetUrl.includes("5006") || (source?.bookSourceUrl || "").includes("5006"))) {
             const bid = j.data?.book_id || j.book_id || j.data?.bookId || "";
             url = `${source?.bookSourceUrl || "http://119.45.176.116:5006"}/chapterContent,{"body":{"book_id":${bid},"chapterIdList":"${ch.id},"},"method":"POST"}`;
-          } else if (url && !url.startsWith("http")) {
-            if (url.includes(".html") && (source?.bookSourceUrl || "").includes("chuangke")) {
-              url = `https://chapter.chuangke.tv/${url.replace(/^\/+/, "")}`;
-            } else {
+          } else {
+            url = ch.url || ch.link || ch.path || "";
+            if (url.startsWith("//")) {
+              url = `${new URL(baseDomain).protocol}${url}`;
+            } else if (url && !url.startsWith("http")) {
               url = `${baseDomain}/${url.replace(/^\/+/, "")}`;
             }
           }
