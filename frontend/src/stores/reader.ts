@@ -1346,11 +1346,12 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   async function loadChapter(index: number, forceRefresh = false) {
-    if (!book.value || !chapters.value[index]) return
+    if (!book.value || !chapters.value.length) return
+    const safeIndex = Math.max(0, Math.min(chapters.value.length - 1, index))
 
     loading.value = true
     try {
-      const chapterContent = await fetchChapterContent(index, forceRefresh)
+      const chapterContent = await fetchChapterContent(safeIndex, forceRefresh)
       if (chapterContent == null) return
 
       const savedPos = getSavedReadingPosition(book.value.bookUrl)
@@ -1360,19 +1361,19 @@ export const useReaderStore = defineStore('reader', () => {
       const previousSavedProgress = (savedPos && typeof savedPos.progress === 'number')
         ? savedPos.progress
         : decodeServerProgress(book.value.durChapterPos)
-      const isOpeningSavedChapter = !forceRefresh && index === previousSavedIndex
+      const isOpeningSavedChapter = !forceRefresh && safeIndex === previousSavedIndex
       const initialProgress = isOpeningSavedChapter ? previousSavedProgress : 0
 
-      setActiveChapterState(index, chapterContent, initialProgress)
-      markChapterAsRead(index)
-      appStore.markChapterRead(book.value.bookUrl, index, chapters.value.length)
+      setActiveChapterState(safeIndex, chapterContent, initialProgress)
+      markChapterAsRead(safeIndex)
+      appStore.markChapterRead(book.value.bookUrl, safeIndex, chapters.value.length)
 
       if (!isOpeningSavedChapter) {
-        await persistProgress(index, 0)
+        await persistProgress(safeIndex, 0)
       }
 
       if (config.enablePreload) {
-        setTimeout(() => preloadAroundChapter(index), forceRefresh ? 1500 : 1000)
+        setTimeout(() => preloadAroundChapter(safeIndex), forceRefresh ? 1500 : 1000)
       }
     } finally {
       loading.value = false

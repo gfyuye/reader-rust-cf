@@ -994,47 +994,57 @@ async function handleGetBookContent(request: Request, env: Env): Promise<Respons
 
     fetchOpts.headers = getDynamicHeaders(source, reqUrl);
 
-    const resp = await fetch(reqUrl, fetchOpts);
-    const raw = await fetchTextWithEncoding(resp);
+    try {
+      const resp = await fetch(reqUrl, fetchOpts);
+      if (!resp.ok) {
+        return jsonResponse({
+          isSuccess: false,
+          errorMsg: `源站返回 HTTP ${resp.status} (${resp.statusText || "访问受限"})`,
+        });
+      }
+      const raw = await fetchTextWithEncoding(resp);
 
-    if (raw.trim().startsWith("{") || raw.trim().startsWith("[")) {
-      try {
-        const j = JSON.parse(raw);
-        let contentVal = "";
-        const findContent = (obj: any) => {
-          if (!obj || contentVal) return;
-          if (typeof obj === "object") {
-            for (const [k, v] of Object.entries(obj)) {
-              if (k.toLowerCase() === "content" && typeof v === "string" && v.length > contentVal.length) {
-                contentVal = v;
-              } else {
-                findContent(v);
+      if (raw.trim().startsWith("{") || raw.trim().startsWith("[")) {
+        try {
+          const j = JSON.parse(raw);
+          let contentVal = "";
+          const findContent = (obj: any) => {
+            if (!obj || contentVal) return;
+            if (typeof obj === "object") {
+              for (const [k, v] of Object.entries(obj)) {
+                if (k.toLowerCase() === "content" && typeof v === "string" && v.length > contentVal.length) {
+                  contentVal = v;
+                } else {
+                  findContent(v);
+                }
               }
             }
+          };
+          findContent(j);
+          if (contentVal) {
+            if (contentVal.length > 50 && /^[A-Za-z0-9+/=]+$/.test(contentVal)) {
+              try {
+                contentVal = await decryptAes128Cbc(contentVal, "Pxga!h*e4@T8xfOm", "E&z!EHGLd$fli*8R");
+              } catch {}
+            }
+            return jsonResponse({ isSuccess: true, data: contentVal });
           }
-        };
-        findContent(j);
-        if (contentVal) {
-          if (contentVal.length > 50 && /^[A-Za-z0-9+/=]+$/.test(contentVal)) {
-            try {
-              contentVal = await decryptAes128Cbc(contentVal, "Pxga!h*e4@T8xfOm", "E&z!EHGLd$fli*8R");
-            } catch {}
-          }
-          return jsonResponse({ isSuccess: true, data: contentVal });
-        }
-      } catch {}
+        } catch {}
+      }
+
+      // HTML response: extract body content from standard content containers
+      const contentMatch =
+        raw.match(/<div[^>]+(?:id|class)=["'][^"']*(?:novelcontent|read-content|chapter-content|content)[^"']*["'][^>]*>([\s\S]*?)<\/div>/i) ||
+        raw.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
+
+      if (contentMatch) {
+        return jsonResponse({ isSuccess: true, data: contentMatch[1] });
+      }
+
+      return jsonResponse({ isSuccess: true, data: raw });
+    } catch (err: any) {
+      return jsonResponse({ isSuccess: false, errorMsg: err.message || "获取章节正文失败" });
     }
-
-    // HTML response: extract body content from standard content containers
-    const contentMatch =
-      raw.match(/<div[^>]+(?:id|class)=["'][^"']*(?:novelcontent|read-content|chapter-content|content)[^"']*["'][^>]*>([\s\S]*?)<\/div>/i) ||
-      raw.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
-
-    if (contentMatch) {
-      return jsonResponse({ isSuccess: true, data: contentMatch[1] });
-    }
-
-    return jsonResponse({ isSuccess: true, data: raw });
   }
 
   return jsonResponse({ isSuccess: false, errorMsg: "未识别的书籍格式" });

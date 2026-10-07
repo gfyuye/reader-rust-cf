@@ -1834,11 +1834,18 @@ watch(() => store.currentIndex, async () => {
 })
 
 watch(
-  [() => store.chapters.length, () => store.chaptersLoading, () => store.loading, isContinuousMode],
-  async ([chapterCount, chaptersLoading, loadingNow, continuousMode]) => {
-    if (!continuousMode || !chapterCount || chaptersLoading || loadingNow || continuousChapters.value.length) return
-    await initializeContinuousChapters(store.currentIndex, false)
-    scheduleRestoreReadingPosition()
+  [() => store.chapters.length, () => store.chaptersLoading, () => store.loading, isContinuousMode, () => store.content],
+  async ([chapterCount, chaptersLoading, loadingNow, continuousMode, content]) => {
+    if (!chapterCount || chaptersLoading || loadingNow) return
+    if (continuousMode) {
+      if (!continuousChapters.value.length) {
+        await initializeContinuousChapters(store.currentIndex, false)
+        scheduleRestoreReadingPosition()
+      }
+    } else if (!content) {
+      await store.loadChapter(store.currentIndex)
+      scheduleRestoreReadingPosition()
+    }
   },
   { immediate: true },
 )
