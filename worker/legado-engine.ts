@@ -551,24 +551,34 @@ export async function executeLegadoJs(code: string, context: LegadoContext = {})
   cleanCode = cleanCode.replace(/^<js>\s*/i, "").replace(/\s*<\/js>$/i, "");
   cleanCode = cleanCode.replace(/(\.map\s*\()\s*(\[[^\]]+\])\s*=>/g, "$1($2) =>");
 
+  // Auto-await async helper methods
+  cleanCode = cleanCode.replace(/\bjava\.aesBase64DecodeToString\s*\(/g, "await java.aesBase64DecodeToString(");
+  cleanCode = cleanCode.replace(/\bjava\.digestHex\s*\(/g, "await java.digestHex(");
+  cleanCode = cleanCode.replace(/\bdecode\s*\(/g, "await decode(");
+
   const argNames = Object.keys(env);
   const argValues = Object.values(env);
 
-  try {
-    const fn = new Function(
-      ...argNames,
-      `
-      let result = typeof result !== 'undefined' ? result : '';
-      try {
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+
+  let bodyCode: string;
+  if (!cleanCode.includes(";") && !cleanCode.includes("\n") && !cleanCode.startsWith("return")) {
+    bodyCode = `return (${cleanCode});`;
+  } else {
+    bodyCode = `
+      let __output = typeof result !== 'undefined' ? result : '';
+      const __exec = async () => {
         ${cleanCode}
-      } catch (e) {
-        // Return result if already assigned
-      }
-      return typeof result !== 'undefined' ? result : '';
-    `
-    );
-    const res = fn(...argValues);
-    return res instanceof Promise ? await res : res;
+      };
+      const __ret = await __exec();
+      if (__ret !== undefined) return __ret;
+      return typeof result !== 'undefined' ? result : __output;
+    `;
+  }
+
+  try {
+    const fn = new AsyncFunction(...argNames, bodyCode);
+    return await fn(...argValues);
   } catch (err: any) {
     console.warn("Legado JS execution error:", err.message);
     return context.result;
