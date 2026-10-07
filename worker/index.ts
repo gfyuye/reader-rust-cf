@@ -1,4 +1,11 @@
 import { ENV_DEFAULTS } from "./env-defaults";
+import {
+  parseSearchResultsWithRules,
+  parseChapterListWithRules,
+  parseContentWithRules,
+  evaluateLegadoTemplate,
+  executeLegadoJs,
+} from "./legado-engine";
 
 /**
  * Cloudflare Worker Backend for reader-rust
@@ -1015,6 +1022,16 @@ async function handleGetBookContent(request: Request, env: Env): Promise<Respons
         });
       }
       const raw = await fetchTextWithEncoding(resp);
+
+      // Try rule-based content extraction using Legado Engine first
+      if (source?.ruleContent?.content) {
+        try {
+          const ruleBody = await parseContentWithRules(raw, source, reqUrl);
+          if (ruleBody && ruleBody.trim().length > 0) {
+            return jsonResponse({ isSuccess: true, data: ruleBody });
+          }
+        } catch {}
+      }
 
       if (raw.trim().startsWith("{") || raw.trim().startsWith("[")) {
         try {
@@ -4649,6 +4666,9 @@ async function searchSingleSource(source: any, key: string, page: number, env: E
     if (!resp.ok) return [];
     const text = await resp.text();
 
+    const ruleBooks = await parseSearchResultsWithRules(text, source, targetUrl, key);
+    if (ruleBooks.length > 0) return ruleBooks;
+
     return await extractSearchResults(text, source, targetUrl, key);
   } catch {
     return [];
@@ -4973,6 +4993,11 @@ async function handleGetChapterList(request: Request, env: Env): Promise<Respons
 }
 
 async function parseSourceChapterList(text: string, source: any, targetUrl: string): Promise<any[]> {
+  try {
+    const ruleChapters = await parseChapterListWithRules(text, source, targetUrl);
+    if (ruleChapters && ruleChapters.length > 0) return ruleChapters;
+  } catch {}
+
   const chapters: any[] = [];
   const baseDomain = new URL(targetUrl).origin;
 
