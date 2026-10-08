@@ -5,6 +5,11 @@ import {
   parseContentWithRules,
   evaluateLegadoTemplate,
   executeLegadoJs,
+  analyzeUrl,
+  getSessionVariable,
+  setSessionVariable,
+  jsonpathQuery,
+  jsonpathFirstString,
 } from "./legado-engine";
 
 /**
@@ -835,27 +840,17 @@ function getDynamicHeaders(source: any, targetUrl = ""): Record<string, string> 
     return headers;
   }
 
-  const isWtzw = (targetUrl && (targetUrl.includes("wtzw.com") || targetUrl.includes("api-bc") || targetUrl.includes("api-ks"))) ||
-                 (source?.bookSourceUrl || "").includes("wtzw.com") || (source?.bookSourceName || "").includes("七猫");
-  if (isWtzw) {
-    const signKey = "d3dGiJc651gSQ8w1";
-    const qmHeaders: Record<string, string> = {
-      "app-version": "51110",
-      "platform": "android",
-      "reg": "0",
-      "AUTHORIZATION": "",
-      "application-id": "com.****.reader",
-      "net-env": "1",
-      "channel": "unknown",
-      "qm-params": "",
-    };
-    const headerSign = md5(
-      Object.keys(qmHeaders).sort().reduce((pre, n) => pre + n + "=" + qmHeaders[n], "") + signKey
-    );
-    qmHeaders["sign"] = headerSign;
-    Object.assign(headers, qmHeaders);
-    return headers;
-  }
+  // Merge dynamically stored headers from java.put("headers", ...)
+  try {
+    const savedHeaders = getSessionVariable("headers");
+    if (savedHeaders) {
+      const parsed = typeof savedHeaders === "string" ? JSON.parse(savedHeaders) : savedHeaders;
+      const h = parsed.headers || parsed;
+      if (h && typeof h === "object") {
+        Object.assign(headers, h);
+      }
+    }
+  } catch {}
 
   if (source?.header) {
     const hdr = String(source.header).trim();
@@ -1073,24 +1068,6 @@ async function handleGetBookContent(request: Request, env: Env): Promise<Respons
           };
           findContent(j);
           if (contentVal) {
-            if (contentVal.length > 50 && /^[A-Za-z0-9+/=]+$/.test(contentVal)) {
-              let decrypted = false;
-              try {
-                contentVal = await decryptAes128Cbc(contentVal, "Pxga!h*e4@T8xfOm", "E&z!EHGLd$fli*8R");
-                decrypted = true;
-              } catch {}
-              if (!decrypted) {
-                try {
-                  const rawBytes = Uint8Array.from(atob(contentVal), (c) => c.charCodeAt(0));
-                  const iv = rawBytes.subarray(0, 16);
-                  const encData = rawBytes.subarray(16);
-                  const keyBytes = new TextEncoder().encode("242ccb8230d709e1");
-                  const cryptoKey = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-CBC" }, false, ["decrypt"]);
-                  const decryptedBuf = await crypto.subtle.decrypt({ name: "AES-CBC", iv }, cryptoKey, encData);
-                  contentVal = new TextDecoder().decode(decryptedBuf);
-                } catch {}
-              }
-            }
             return jsonResponse({ isSuccess: true, data: contentVal });
           }
         } catch {}
@@ -1403,45 +1380,17 @@ async function handleTestBookSources(request: Request, env: Env): Promise<Respon
   for (const s of toTest) {
     const t0 = Date.now();
     try {
-      const isWtzw = (s.bookSourceUrl || "").includes("wtzw.com") || (s.searchUrl || "").includes("wtzw.com") || (s.bookSourceName || "").includes("七猫");
-      if (isWtzw) {
-        const signKey = "d3dGiJc651gSQ8w1";
-        const params: Record<string, string> = {
-          gender: "3",
-          imei_ip: "2937357107",
-          page: "1",
-          wd: keyword,
-        };
-        const paramSign = md5(
-          Object.keys(params).sort().reduce((pre, n) => pre + n + "=" + params[n], "") + signKey
-        );
-        params["sign"] = paramSign;
-        const qmEncode = (p: Record<string, string>) => Object.keys(p).map((k) => `${k}=${encodeURIComponent(p[k])}`).join("&");
-        const testUrl = `https://api-bc.wtzw.com/api/v5/search/words?${qmEncode(params)}`;
-        const resp = await fetch(testUrl, {
-          headers: getDynamicHeaders(s, testUrl),
-          signal: AbortSignal.timeout(5000),
-        });
-        results.push({
-          bookSourceUrl: s.bookSourceUrl,
-          bookSourceName: s.bookSourceName,
-          status: resp.ok ? "success" : "failed",
-          durationMs: Date.now() - t0,
-          searchCount: resp.ok ? 1 : 0,
-          error: resp.ok ? undefined : `HTTP ${resp.status}`,
-        });
-        continue;
-      }
-
       if (s.searchUrl) {
-        let testUrl = s.searchUrl;
-        if (testUrl.includes("{{key}}")) testUrl = testUrl.replace(/\{\{key\}\}/g, encodeURIComponent(keyword));
-        else if (testUrl.includes("${key}")) testUrl = testUrl.replace(/\$\{key\}/g, encodeURIComponent(keyword));
-        else testUrl = testUrl.split("@")[0].split(";")[0].split(",")[0];
-
-        if (testUrl.startsWith("http")) {
-          const resp = await fetch(testUrl, {
-            headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+        const spec = await analyzeUrl(s.searchUrl, keyword, 1, s.bookSourceUrl || "", s);
+        if (spec.url && spec.url.startsWith("http")) {
+          const fetchHeaders = {
+            ...getDynamicHeaders(s, spec.url),
+            ...(spec.headers as Record<string, string>),
+          };
+          const resp = await fetch(spec.url, {
+            method: spec.method,
+            headers: fetchHeaders,
+            body: spec.body,
             signal: AbortSignal.timeout(5000),
           });
           results.push({
@@ -4678,110 +4627,32 @@ async function decodeXiaoXiao(contentB64: string): Promise<any> {
 
 async function searchSingleSource(source: any, key: string, page: number, env: Env): Promise<any[]> {
   try {
-    const isWtzw = (source.bookSourceUrl || "").includes("wtzw.com") || (source.searchUrl || "").includes("wtzw.com") || (source.bookSourceName || "").includes("七猫");
-    if (isWtzw) {
-      const signKey = "d3dGiJc651gSQ8w1";
-      const params: Record<string, string> = {
-        gender: "3",
-        imei_ip: "2937357107",
-        page: String(page),
-        wd: key,
-      };
-      const paramSign = md5(
-        Object.keys(params).sort().reduce((pre, n) => pre + n + "=" + params[n], "") + signKey
-      );
-      params["sign"] = paramSign;
-      const qmEncode = (p: Record<string, string>) => Object.keys(p).map((k) => `${k}=${encodeURIComponent(p[k])}`).join("&");
-      const searchUrl = `https://api-bc.wtzw.com/api/v5/search/words?${qmEncode(params)}`;
-      const resp = await fetch(searchUrl, { headers: getDynamicHeaders(source, searchUrl), signal: AbortSignal.timeout(8000) });
-      if (!resp.ok) return [];
-      const data = await resp.json<any>();
-      const list = data?.data?.books || [];
-      const books: any[] = [];
-      for (const item of list) {
-        const id = String(item.id || "");
-        if (!id) continue;
-        const name = (item.original_title || item.title || "").replace(/<[^>]+>/g, "");
-        const author = item.original_author || item.author || "未知作者";
-        const tocSign = md5(`id=${id}${signKey}`);
-        const tocUrl = `https://api-ks.wtzw.com/api/v1/chapter/chapter-list?id=${id}&sign=${tocSign}`;
-        const detailParams: Record<string, string> = { id, imei_ip: "2937357107", teeny_mode: "0" };
-        const detailSign = md5(Object.keys(detailParams).sort().reduce((pre, n) => pre + n + "=" + detailParams[n], "") + signKey);
-        detailParams["sign"] = detailSign;
-        const detailUrl = `https://api-bc.wtzw.com/api/v4/book/detail?${qmEncode(detailParams)}`;
-        books.push({
-          name,
-          author,
-          bookUrl: detailUrl,
-          tocUrl,
-          origin: source.bookSourceUrl || "https://api-bc.wtzw.com",
-          originName: source.bookSourceName || "七猫API",
-          coverUrl: item.image_link || "",
-          intro: (item.intro || "").replace(/\r\n/g, "\n"),
-          kind: item.ptags || "",
-          wordCount: item.words_num || "",
-        });
-      }
-      return books;
-    }
-
     let rawUrl = (source.searchUrl || "").trim();
     if (!rawUrl) return [];
 
-    let urlConfig: any = null;
-    if (rawUrl.includes(",{") || rawUrl.includes(", {")) {
-      const idx = rawUrl.indexOf(",{") !== -1 ? rawUrl.indexOf(",{") : rawUrl.indexOf(", {");
-      try {
-        urlConfig = JSON.parse(rawUrl.substring(idx + 1));
-      } catch {}
-      rawUrl = rawUrl.substring(0, idx).trim();
-    }
+    const spec = await analyzeUrl(rawUrl, key, page, source.bookSourceUrl || "", source);
+    if (!spec.url || !isSafeRemoteUrl(spec.url)) return [];
 
-    const encodedKey = encodeURIComponent(key);
-    let targetUrl = rawUrl
-      .replace(/\{\{[^}]*key[^}]*\}\}/gi, encodedKey)
-      .replace(/\$\{key\}/g, encodedKey)
-      .replace(/\{\{page\}\}/g, String(page))
-      .replace(/\$\{page\}/g, String(page));
-
-    if (targetUrl.startsWith("/")) {
-      const baseOrigin = new URL(source.bookSourceUrl).origin;
-      targetUrl = `${baseOrigin}${targetUrl}`;
-    }
-
-    if (!isSafeRemoteUrl(targetUrl)) return [];
-
-    const headers = getDynamicHeaders(source);
+    const fetchHeaders = {
+      ...getDynamicHeaders(source, spec.url),
+      ...(spec.headers as Record<string, string>),
+    };
 
     const fetchOptions: RequestInit = {
-      headers,
+      method: spec.method,
+      headers: fetchHeaders,
+      body: spec.body,
       signal: AbortSignal.timeout(8000),
     };
 
-    if (urlConfig) {
-      if (urlConfig.method) fetchOptions.method = urlConfig.method.toUpperCase();
-      if (urlConfig.headers) Object.assign(headers, urlConfig.headers);
-      if (urlConfig.body) {
-        let bStr = typeof urlConfig.body === "string" ? urlConfig.body : JSON.stringify(urlConfig.body);
-        bStr = bStr
-          .replace(/\{\{[^}]*key[^}]*\}\}/gi, encodedKey)
-          .replace(/\$\{key\}/g, encodedKey)
-          .replace(/\{\{page\}\}/g, String(page));
-        fetchOptions.body = bStr;
-        if (typeof urlConfig.body !== "string" && !headers["Content-Type"]) {
-          headers["Content-Type"] = "application/json";
-        }
-      }
-    }
-
-    const resp = await fetch(targetUrl, fetchOptions);
+    const resp = await fetch(spec.url, fetchOptions);
     if (!resp.ok) return [];
     const text = await resp.text();
 
-    const ruleBooks = await parseSearchResultsWithRules(text, source, targetUrl, key);
+    const ruleBooks = await parseSearchResultsWithRules(text, source, spec.url, key);
     if (ruleBooks.length > 0) return ruleBooks;
 
-    return await extractSearchResults(text, source, targetUrl, key);
+    return await extractSearchResults(text, source, spec.url, key);
   } catch {
     return [];
   }
@@ -5083,30 +4954,117 @@ async function handleGetChapterList(request: Request, env: Env): Promise<Respons
       }
     }
 
-    let reqUrl = targetUrl;
-    if (reqUrl.startsWith("/")) {
-      reqUrl = `${source?.bookSourceUrl || ""}${reqUrl}`;
+    // Resolve tocUrl from ruleBookInfo if targetUrl is a detail URL or tocUrl was not provided
+    const ruleBookInfo = source?.ruleBookInfo;
+    const hasTocUrlRule = ruleBookInfo?.tocUrl && String(ruleBookInfo.tocUrl).trim().length > 0;
+    const isDetailUrl = !tocUrl || tocUrl === bookUrl;
+
+    if (hasTocUrlRule && isDetailUrl && bookUrl) {
+      try {
+        const detailSpec = await analyzeUrl(bookUrl, "", 1, source?.bookSourceUrl || "", source);
+        if (detailSpec.url && detailSpec.url.startsWith("http")) {
+          const detailHeaders = {
+            ...getDynamicHeaders(source, detailSpec.url),
+            ...(detailSpec.headers as Record<string, string>),
+          };
+          const dResp = await fetch(detailSpec.url, {
+            method: detailSpec.method,
+            headers: detailHeaders,
+            body: detailSpec.body,
+            signal: AbortSignal.timeout(8000),
+          });
+          if (dResp.ok) {
+            const detailText = await fetchTextWithEncoding(dResp);
+            let detailData: any = null;
+            if (detailText.trim().startsWith("{") || detailText.trim().startsWith("[")) {
+              try { detailData = JSON.parse(detailText); } catch {}
+            }
+
+            // Apply ruleBookInfo.init
+            let scope = detailData;
+            if (ruleBookInfo.init && detailData) {
+              const initRule = String(ruleBookInfo.init).trim();
+              const extracted = jsonpathQuery(detailData, initRule.startsWith("$") ? initRule : `$.${initRule}`);
+              if (extracted && extracted.length > 0) {
+                scope = extracted[0];
+              }
+            }
+
+            // Process any @put in ruleBookInfo fields
+            for (const [k, v] of Object.entries(ruleBookInfo)) {
+              if (typeof v === "string" && v.includes("@put:{")) {
+                const putMatch = v.match(/@put:\{([^:]+):([^}]+)\}/);
+                if (putMatch) {
+                  const varName = putMatch[1].trim();
+                  const varRule = putMatch[2].trim();
+                  const varVal = scope ? (jsonpathFirstString(scope, varRule.startsWith("$") ? varRule : `$.${varRule}`) || scope[varRule]) : "";
+                  if (varVal) {
+                    setSessionVariable(varName, String(varVal));
+                  }
+                }
+              }
+            }
+
+            // Evaluate ruleBookInfo.tocUrl
+            let rawTocRule = String(ruleBookInfo.tocUrl).trim();
+            if (rawTocRule.includes("{{")) {
+              const regex = /\{\{([\s\S]*?)\}\}/g;
+              let tm;
+              while ((tm = regex.exec(rawTocRule)) !== null) {
+                const expr = tm[1].trim();
+                let val = "";
+                if (expr.startsWith("$.") || expr.startsWith("$..") || expr === "$") {
+                  val = String(jsonpathFirstString(scope, expr) ?? "");
+                } else if (scope && scope[expr] !== undefined) {
+                  val = String(scope[expr]);
+                } else {
+                  val = String(getSessionVariable(expr) || "");
+                }
+                rawTocRule = rawTocRule.replace(tm[0], val);
+              }
+            }
+
+            let resolvedTocUrl = rawTocRule;
+            if (resolvedTocUrl.startsWith("@js:") || resolvedTocUrl.includes("<js>")) {
+              const jsRes = await executeLegadoJs(resolvedTocUrl, {
+                source,
+                baseUrl: detailSpec.url,
+                result: scope || detailText,
+              });
+              if (typeof jsRes === "string") {
+                resolvedTocUrl = jsRes.trim();
+              }
+            }
+
+            if (resolvedTocUrl && resolvedTocUrl.trim()) {
+              targetUrl = resolvedTocUrl.trim();
+            }
+          }
+        }
+      } catch (err: any) {
+        console.warn("Failed to resolve tocUrl from ruleBookInfo:", err.message);
+      }
     }
 
-    const isWtzw = reqUrl.includes("wtzw.com") || (source?.bookSourceUrl || "").includes("wtzw.com") || (source?.bookSourceName || "").includes("七猫");
-    const bidMatch = reqUrl.match(/[?&]id=(\d+)/) || bookUrl.match(/[?&]id=(\d+)/) || (tocUrl.match(/[?&]id=(\d+)/));
-    if (isWtzw && bidMatch) {
-      const bid = bidMatch[1];
-      const signKey = "d3dGiJc651gSQ8w1";
-      const sign = md5(`id=${bid}${signKey}`);
-      reqUrl = `https://api-ks.wtzw.com/api/v1/chapter/chapter-list?id=${bid}&sign=${sign}`;
-    }
-
-    if (!reqUrl.startsWith("http")) {
+    const tocSpec = await analyzeUrl(targetUrl, "", 1, source?.bookSourceUrl || "", source);
+    if (!tocSpec.url || !tocSpec.url.startsWith("http")) {
       return jsonResponse({ isSuccess: true, data: [] });
     }
 
-    let fetchHeaders = getDynamicHeaders(source, reqUrl);
+    const fetchHeaders = {
+      ...getDynamicHeaders(source, tocSpec.url),
+      ...(tocSpec.headers as Record<string, string>),
+    };
 
-    const resp = await fetch(reqUrl, { headers: fetchHeaders, signal: AbortSignal.timeout(10000) });
+    const resp = await fetch(tocSpec.url, {
+      method: tocSpec.method,
+      headers: fetchHeaders,
+      body: tocSpec.body,
+      signal: AbortSignal.timeout(10000),
+    });
     if (!resp.ok) return jsonResponse({ isSuccess: true, data: [] });
     const text = await fetchTextWithEncoding(resp);
-    const chapters = await parseSourceChapterList(text, source, reqUrl);
+    const chapters = await parseSourceChapterList(text, source, tocSpec.url);
     return jsonResponse({ isSuccess: true, data: chapters });
   } catch (err: any) {
     console.error("handleGetChapterList error:", err);
@@ -5177,25 +5135,13 @@ async function parseSourceChapterList(text: string, source: any, targetUrl: stri
             } catch {}
           }
 
-          let url = "";
+          let url = ch.url || ch.link || ch.path || ch.id || "";
           if (ch.path && ((source?.bookSourceUrl || "").includes("chuangke") || targetUrl.includes("chuangke"))) {
             url = `https://chapter.chuangke.tv/${ch.path.replace(/^\/+/, "")}`;
           } else if (ch.id && (targetUrl.includes("5006") || (source?.bookSourceUrl || "").includes("5006"))) {
             const bid = j.data?.book_id || j.book_id || j.data?.bookId || "";
             url = `${source?.bookSourceUrl || "http://119.45.176.116:5006"}/chapterContent,{"body":{"book_id":${bid},"chapterIdList":"${ch.id},"},"method":"POST"}`;
-          } else if (ch.id && (targetUrl.includes("wtzw.com") || (source?.bookSourceUrl || "").includes("wtzw.com") || (source?.bookSourceName || "").includes("七猫"))) {
-            const bid = j.data?.id || (targetUrl.match(/[?&]id=(\d+)/)?.[1]) || "";
-            const signKey = "d3dGiJc651gSQ8w1";
-            const contentParams: Record<string, string> = {
-              chapterId: String(ch.id),
-              id: String(bid),
-            };
-            const contentSign = md5(
-              Object.keys(contentParams).sort().reduce((pre, n) => pre + n + "=" + contentParams[n], "") + signKey
-            );
-            url = `https://api-ks.wtzw.com/api/v1/chapter/content?chapterId=${ch.id}&id=${bid}&sign=${contentSign}`;
           } else {
-            url = ch.url || ch.link || ch.path || "";
             if (url.startsWith("//")) {
               url = `${new URL(baseDomain).protocol}${url}`;
             } else if (url && !url.startsWith("http")) {
