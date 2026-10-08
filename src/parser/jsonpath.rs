@@ -4,7 +4,12 @@ pub fn jsonpath_query(value: &Value, rule: &str) -> Vec<Value> {
     if let Some(rendered) = render_embedded_paths(value, rule) {
         return vec![Value::String(rendered)];
     }
-    if let Ok(res) = jsonpath_lib::select(value, rule) {
+    let normalized_rule = if !rule.starts_with('$') && !rule.trim().is_empty() {
+        format!("$.{}", rule.trim_start_matches('.'))
+    } else {
+        rule.to_string()
+    };
+    if let Ok(res) = jsonpath_lib::select(value, &normalized_rule) {
         let mut out = Vec::new();
         for item in res {
             match item {

@@ -202,8 +202,13 @@ fn eval_js_inner_with_source(
         java_obj.set("deviceID", Func::new(|| -> String { JS_DEVICE_ID.clone() }))?;
         java_obj.set(
             "get",
-            Func::new(|url: String| -> String {
-                java_request_simple("GET", &url, None).unwrap_or_default()
+            Func::new(|key_or_url: String| -> String {
+                if key_or_url.starts_with("http://") || key_or_url.starts_with("https://") {
+                    java_request_simple("GET", &key_or_url, None).unwrap_or_default()
+                } else {
+                    let map = JS_KV.lock().unwrap_or_else(|e| e.into_inner());
+                    map.get(&key_or_url).cloned().unwrap_or_default()
+                }
             }),
         )?;
         java_obj.set(
@@ -214,8 +219,14 @@ fn eval_js_inner_with_source(
         )?;
         java_obj.set(
             "put",
-            Func::new(|url: String, body: String| -> String {
-                java_request_simple("PUT", &url, Some(body)).unwrap_or_default()
+            Func::new(|key_or_url: String, val_or_body: String| -> String {
+                if key_or_url.starts_with("http://") || key_or_url.starts_with("https://") {
+                    java_request_simple("PUT", &key_or_url, Some(val_or_body)).unwrap_or_default()
+                } else {
+                    let mut map = JS_KV.lock().unwrap_or_else(|e| e.into_inner());
+                    map.insert(key_or_url, val_or_body.clone());
+                    val_or_body
+                }
             }),
         )?;
         java_obj.set(

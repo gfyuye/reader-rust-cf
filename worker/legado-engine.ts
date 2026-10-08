@@ -825,6 +825,21 @@ export async function parseSearchResultsWithRules(
     }
 
     if (!name) continue;
+    if (bookUrl.startsWith("@js:") || bookUrl.includes("<js>")) {
+      const isWtzw = (source?.bookSourceUrl || "").includes("wtzw.com") || (source?.bookSourceName || "").includes("七猫");
+      const id = String(item.id || item.book_id || item.bookId || "");
+      if (isWtzw && id) {
+        const signKey = "d3dGiJc651gSQ8w1";
+        const tocSign = md5Hex(`id=${id}${signKey}`);
+        const tocUrl = `https://api-ks.wtzw.com/api/v1/chapter/chapter-list?id=${id}&sign=${tocSign}`;
+        const detailParams: Record<string, string> = { id, imei_ip: "2937357107", teeny_mode: "0" };
+        const detailSign = md5Hex(Object.keys(detailParams).sort().reduce((pre, n) => pre + n + "=" + detailParams[n], "") + signKey);
+        detailParams["sign"] = detailSign;
+        const qmEncode = (p: Record<string, string>) => Object.keys(p).map((k) => `${k}=${encodeURIComponent(p[k])}`).join("&");
+        bookUrl = `https://api-bc.wtzw.com/api/v4/book/detail?${qmEncode(detailParams)}`;
+        (item as any)._tocUrl = tocUrl;
+      }
+    }
     if (bookUrl.startsWith("//")) bookUrl = `${new URL(baseDomain).protocol}${bookUrl}`;
     else if (bookUrl.startsWith("/")) bookUrl = `${baseDomain}${bookUrl}`;
 
@@ -832,6 +847,7 @@ export async function parseSearchResultsWithRules(
       name,
       author,
       bookUrl: bookUrl || `${baseUrl}#${name}`,
+      tocUrl: (item as any)._tocUrl,
       origin: source.bookSourceUrl || baseUrl,
       originName: source.bookSourceName || "网络书源",
       coverUrl,
@@ -883,7 +899,11 @@ export async function parseChapterListWithRules(
 
   let rawChapters: any[] = [];
   if (data) {
-    const extracted = jsonpathQuery(data, listRule || "$.data.chapters");
+    let extracted = jsonpathQuery(data, listRule || "$.data.chapters");
+    if (!extracted || extracted.length === 0) {
+      if (data.data?.chapter_lists) extracted = data.data.chapter_lists;
+      else if (data.chapter_lists) extracted = data.chapter_lists;
+    }
     if (Array.isArray(extracted)) rawChapters = extracted;
     else if (Array.isArray(data)) rawChapters = data;
   } else {
@@ -946,6 +966,22 @@ export async function parseChapterListWithRules(
         }
       } else {
         url = String(jsonpathFirstString(ch, urlRule) || ch.url || ch.link || ch.path || "");
+      }
+
+      const isWtzw = targetUrl.includes("wtzw.com") || (source?.bookSourceUrl || "").includes("wtzw.com") || (source?.bookSourceName || "").includes("七猫");
+      if (ch.id && isWtzw) {
+        const bid = data?.data?.id || (targetUrl.match(/[?&]id=(\d+)/)?.[1]) || "";
+        if (bid) {
+          const signKey = "d3dGiJc651gSQ8w1";
+          const contentParams: Record<string, string> = {
+            chapterId: String(ch.id),
+            id: String(bid),
+          };
+          const contentSign = md5Hex(
+            Object.keys(contentParams).sort().reduce((pre, n) => pre + n + "=" + contentParams[n], "") + signKey
+          );
+          url = `https://api-ks.wtzw.com/api/v1/chapter/content?chapterId=${ch.id}&id=${bid}&sign=${contentSign}`;
+        }
       }
     } else {
       // HTML node
@@ -1010,6 +1046,31 @@ export async function parseContentWithRules(
       } catch (err: any) {
         console.warn("Direct aesBase64DecodeToString error:", err.message);
       }
+    }
+  }
+
+  // Check for SecretKeySpec AES decryption (e.g. Qimao / Legado JavaImporter AES)
+  const keyMatch = contentRule.match(/SecretKeySpec\s*\(\s*(?:String\s*\(\s*)?["']([^"']+)["']/i);
+  if (keyMatch) {
+    try {
+      const keyStr = keyMatch[1];
+      let b64 = body.trim();
+      if (b64.startsWith("{") || b64.startsWith("[")) {
+        try {
+          const j = JSON.parse(b64);
+          b64 = j.data?.content || j.content || b64;
+        } catch {}
+      }
+      const rawBytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const iv = rawBytes.subarray(0, 16);
+      const encData = rawBytes.subarray(16);
+      const keyBytes = new TextEncoder().encode(keyStr);
+      const cryptoKey = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-CBC" }, false, ["decrypt"]);
+      const decryptedBuf = await crypto.subtle.decrypt({ name: "AES-CBC", iv }, cryptoKey, encData);
+      body = new TextDecoder().decode(decryptedBuf);
+      return body;
+    } catch (err: any) {
+      console.warn("Direct SecretKeySpec AES decryption error:", err.message);
     }
   }
 
