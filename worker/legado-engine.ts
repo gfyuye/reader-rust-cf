@@ -899,7 +899,22 @@ export async function parseChapterListWithRules(
 
     if (typeof ch === "object" && !(ch as any).rawAttrs) {
       const nameRule = ruleToc.chapterName || "name";
-      if (nameRule.includes("@js:")) {
+      if (nameRule.includes("java.aesBase64DecodeToString")) {
+        const match = nameRule.match(
+          /java\.aesBase64DecodeToString\s*\(\s*([^,]+)\s*,\s*["']([^"']+)["']\s*,\s*["']([^"']+)["']\s*,\s*["']([^"']+)["']\s*\)/
+        );
+        if (match) {
+          try {
+            const fieldRule = nameRule.split("@js:")[0];
+            const rawVal = String(jsonpathFirstString(ch, fieldRule.trim()) || ch.name || ch.title || "");
+            const key = new TextEncoder().encode(match[2]);
+            const iv = new TextEncoder().encode(match[4]);
+            const dec = await aesDecryptCbc(rawVal, key, iv);
+            title = new TextDecoder().decode(dec);
+          } catch {}
+        }
+      }
+      if (!title && nameRule.includes("@js:")) {
         const [fieldRule, jsPart] = nameRule.split("@js:");
         const rawVal = jsonpathFirstString(ch, fieldRule.trim()) || ch.name || ch.title || "";
         title = await executeLegadoJs(jsPart, {
@@ -907,7 +922,7 @@ export async function parseChapterListWithRules(
           baseUrl: targetUrl,
           result: String(rawVal),
         });
-      } else {
+      } else if (!title) {
         title = String(jsonpathFirstString(ch, nameRule) || ch.name || ch.title || `第 ${idx + 1} 章`);
       }
 
@@ -979,6 +994,23 @@ export async function parseContentWithRules(
     const cssRule = contentRule.split("@js:")[0];
     const extracted = extractTextFromHtml(rawText, cssRule || "#content@html");
     if (extracted) body = extracted;
+  }
+
+  if (contentRule.includes("java.aesBase64DecodeToString")) {
+    const match = contentRule.match(
+      /java\.aesBase64DecodeToString\s*\(\s*([^,]+)\s*,\s*["']([^"']+)["']\s*,\s*["']([^"']+)["']\s*,\s*["']([^"']+)["']\s*\)/
+    );
+    if (match) {
+      try {
+        const key = new TextEncoder().encode(match[2]);
+        const iv = new TextEncoder().encode(match[4]);
+        const dec = await aesDecryptCbc(body, key, iv);
+        body = new TextDecoder().decode(dec);
+        return body;
+      } catch (err: any) {
+        console.warn("Direct aesBase64DecodeToString error:", err.message);
+      }
+    }
   }
 
   if (contentRule.includes("@js:")) {
