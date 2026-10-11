@@ -445,6 +445,10 @@ pub async fn book_source_proxy(
     }
 
     let target_url = resolve_proxy_target_url(&raw_target_url, &source.book_source_url)?;
+    // SSRF protection: validate the target URL before forwarding
+    crate::util::network::validate_safe_url(target_url.as_str())
+        .await
+        .map_err(|e| AppError::BadRequest(e))?;
     let upstream_referer = extract_upstream_referer(&headers);
     let response = forward_book_source_request(
         &state,
@@ -1047,7 +1051,8 @@ pub async fn read_remote_source_file(
         .await
         .map_err(AppError::BadRequest)?;
 
-    let client = reqwest::Client::builder()
+    let client = safe_url
+        .pinned_client()
         .timeout(std::time::Duration::from_secs(30))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         .build()

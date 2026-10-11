@@ -69,6 +69,25 @@ impl BookSourceService {
         Ok(out)
     }
 
+    /// Batch fetch multiple sources by URL in a single query.
+    /// Eliminates N+1 when looking up sources by URL in multi-source search.
+    pub async fn get_by_urls(
+        &self,
+        user_ns: &str,
+        book_source_urls: &[String],
+    ) -> Result<std::collections::HashMap<String, BookSource>, AppError> {
+        let rows = self.repo.get_by_urls(user_ns, book_source_urls).await?;
+        let mut out = std::collections::HashMap::new();
+        for (url, json) in rows {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
+                if let Ok(s) = book_source_from_value(value) {
+                    out.insert(url, s);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn delete(&self, user_ns: &str, book_source_url: &str) -> Result<(), AppError> {
         self.repo.delete(user_ns, book_source_url).await
     }

@@ -28,12 +28,15 @@ pub async fn ai_proxy(
     }
     let target = build_ai_proxy_url(&endpoint.base_url, &path, endpoint.use_full_url)
         .map_err(AppError::BadRequest)?;
-    crate::util::network::validate_safe_url(target.as_str())
+    let safe = crate::util::network::validate_safe_url(target.as_str())
         .await
         .map_err(AppError::BadRequest)?;
-    let client = ai_proxy_client()?;
+    let client = safe
+        .pinned_client()
+        .build()
+        .map_err(|e| AppError::Internal(e.into()))?;
     let mut builder = client
-        .post(target)
+        .post(safe.url.clone())
         .header(reqwest::header::ACCEPT, "application/json")
         .json(&body);
 
@@ -157,12 +160,15 @@ pub async fn ai_proxy_image(
 ) -> Result<Response, AppError> {
     require_proxy_user(&state, &auth).await?;
     let target = validate_ai_proxy_image_url(&req.url).map_err(AppError::BadRequest)?;
-    crate::util::network::validate_safe_url(target.as_str())
+    let safe = crate::util::network::validate_safe_url(target.as_str())
         .await
         .map_err(AppError::BadRequest)?;
-    let client = ai_proxy_client()?;
+    let client = safe
+        .pinned_client()
+        .build()
+        .map_err(|e| AppError::Internal(e.into()))?;
     let upstream = client
-        .get(target)
+        .get(safe.url.clone())
         .header(reqwest::header::ACCEPT, "image/*,*/*;q=0.8")
         .send()
         .await

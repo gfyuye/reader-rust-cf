@@ -1,6 +1,9 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use url::{Host, Url};
 
+// Re-export reqwest for use in SafeUrl::pinned_client
+pub use reqwest;
+
 fn is_private_or_local_ipv4(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
     ip.is_loopback() // 127.0.0.0/8
@@ -36,6 +39,23 @@ fn is_private_or_local_ipv6(ip: Ipv6Addr) -> bool {
         let v4 = Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]);
         return is_private_or_local_ipv4(v4);
     }
+    // 6to4 (2002::/16)
+    if (segments[0] & 0xffff) == 0x2002 {
+        return true;
+    }
+    // Teredo (2001::/32)
+    if (segments[0] & 0xffff_ffff) == 0x2001 {
+        return true;
+    }
+    // IPv4-compatible IPv6 (::/96, excluding :: and ::1)
+    if octets[0..12] == [0; 12] && !ip.is_loopback() && !ip.is_unspecified() {
+        let v4 = Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]);
+        return is_private_or_local_ipv4(v4);
+    }
+    // Multicast
+    if (segments[0] & 0xff00) == 0xff00 {
+        return true;
+    }
     false
 }
 
@@ -46,23 +66,47 @@ fn is_private_or_local_ip(ip: IpAddr) -> bool {
     }
 }
 
-pub async fn validate_safe_url(raw: &str) -> Result<Url, String> {
+impl SafeUrl {
+    /// Get the URL as a string slice for backward-compatible callers.
+    pub fn as_str(&self) -> &str {
+        self.url.as_str()
+    }
+
+    /// Build a reqwest client that pins DNS to the resolved IPs to prevent
+    /// DNS rebinding / TOCTOU attacks.
+    pub fn pinned_client(&self) -> reqwest::ClientBuilder {
+        let host = self.url.host_str().unwrap_or("");
+        let builder = reqwest::Client::builder();
+        if !self.resolved_ips.is_empty() && !host.is_empty() {
+            builder.resolve_to_addrs(host, &self.resolved_ips)
+        } else {
+            builder
+        }
+    }
+}
+
+/// Validate a URL against SSRF and resolve DNS to lock the target IP.
+/// Returns the parsed URL and the resolved IPs so callers can pin them
+/// via `reqwest::ClientBuilder::resolve_to_addrs` to prevent DNS rebinding.
+pub async fn validate_safe_url(raw: &str) -> Result<SafeUrl, String> {
     let url = Url::parse(raw.trim()).map_err(|e| format!("无效的 URL: {}", e))?;
     match url.scheme() {
         "http" | "https" => {}
         other => return Err(format!("不支持的协议: {}", other)),
     }
     let host = url.host().ok_or_else(|| "缺少主机名".to_string())?;
-    match host {
+    let resolved_ips: Vec<IpAddr> = match host {
         Host::Ipv4(ip) => {
             if is_private_or_local_ipv4(ip) {
                 return Err("禁止访问内网或本地 IP 地址".to_string());
             }
+            vec![IpAddr::V4(ip)]
         }
         Host::Ipv6(ip) => {
             if is_private_or_local_ipv6(ip) {
                 return Err("禁止访问内网或本地 IP 地址".to_string());
             }
+            vec![IpAddr::V6(ip)]
         }
         Host::Domain(domain) => {
             let lower = domain.to_lowercase();
@@ -75,16 +119,20 @@ pub async fn validate_safe_url(raw: &str) -> Result<Url, String> {
                 return Err("禁止访问本地或内网域名".to_string());
             }
             let port = url.port_or_known_default().unwrap_or(80);
-            if let Ok(addrs) = tokio::net::lookup_host(format!("{}:{}", domain, port)).await {
-                for addr in addrs {
-                    if is_private_or_local_ip(addr.ip()) {
-                        return Err("目标域名解析为内网或本地地址，已拦截 (SSRF 防御)".to_string());
-                    }
-                }
+            let addrs = tokio::net::lookup_host(format!("{}:{}", domain, port))
+                .await
+                .map_err(|e| format!("DNS 解析失败: {} (拒绝请求以防 SSRF)", e))?;
+            let ips: Vec<IpAddr> = addrs
+                .map(|a| a.ip())
+                .filter(|ip| !is_private_or_local_ip(*ip))
+                .collect();
+            if ips.is_empty() {
+                return Err("目标域名解析为内网或本地地址，已拦截 (SSRF 防御)".to_string());
             }
+            ips
         }
-    }
-    Ok(url)
+    };
+    Ok(SafeUrl { url, resolved_ips })
 }
 
 #[cfg(test)]
@@ -105,6 +153,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_allowed_urls() {
-        assert!(validate_safe_url("https://example.com").await.is_ok());
+        let result = validate_safe_url("https://example.com").await;
+        assert!(result.is_ok());
+        let safe = result.unwrap();
+        assert!(!safe.resolved_ips.is_empty());
     }
 }

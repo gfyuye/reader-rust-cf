@@ -1,4 +1,5 @@
 use crate::util::hash::md5_hex;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
@@ -63,6 +64,39 @@ impl FileCache {
     pub async fn exists(&self, user_ns: &str, book_key: &str, chapter_key: &str) -> bool {
         let path = self.chapter_path(user_ns, book_key, chapter_key);
         path.exists()
+    }
+
+    /// Batch-exists check for multiple chapter keys under the same book.
+    /// Reads the book's cache directory once and checks membership, avoiding
+    /// one stat call per chapter key (eliminates N+1 pattern).
+    pub async fn exists_batch(
+        &self,
+        user_ns: &str,
+        book_key: &str,
+        chapter_keys: &[String],
+    ) -> Vec<String> {
+        let book_dir = self.book_path(user_ns, book_key);
+        if !book_dir.exists() {
+            return Vec::new();
+        }
+        let mut present: HashSet<String> = HashSet::new();
+        let mut read_dir = match fs::read_dir(&book_dir).await {
+            Ok(rd) => rd,
+            Err(_) => return Vec::new(),
+        };
+        while let Ok(Some(entry)) = read_dir.next_entry().await {
+            if let Ok(file_name) = entry.file_name().into_string() {
+                present.insert(file_name);
+            }
+        }
+        chapter_keys
+            .iter()
+            .filter(|k| {
+                let name = md5_hex(k) + ".txt";
+                present.contains(name.as_str())
+            })
+            .cloned()
+            .collect()
     }
 
     /// Remove all cache for a book (delete the book's cache directory)

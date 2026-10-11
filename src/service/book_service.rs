@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration, Instant};
 
 /// State for background chapter fetching
@@ -41,8 +41,8 @@ pub struct BookService {
     parser: RuleEngine,
     cache: FileCache,
     storage_dir: PathBuf,
-    source_cookies: Arc<RwLock<HashMap<String, String>>>,
-    rate_states: Arc<RwLock<HashMap<String, RateState>>>,
+    source_cookies: Arc<Mutex<HashMap<String, String>>>,
+    rate_states: Arc<Mutex<HashMap<String, RateState>>>,
 }
 
 #[derive(Clone, Default)]
@@ -53,7 +53,7 @@ struct RateState {
 }
 
 struct RateGuard {
-    states: Arc<RwLock<HashMap<String, RateState>>>,
+    states: Arc<Mutex<HashMap<String, RateState>>>,
     source_url: Option<String>,
 }
 
@@ -61,17 +61,10 @@ impl Drop for RateGuard {
     fn drop(&mut self) {
         if let Some(url) = self.source_url.take() {
             let states = self.states.clone();
-            if let Ok(mut guard) = states.try_write() {
-                if let Some(state) = guard.get_mut(&url) {
-                    state.in_flight = false;
-                }
-            } else {
-                tokio::spawn(async move {
-                    let mut guard = states.write().await;
-                    if let Some(state) = guard.get_mut(&url) {
-                        state.in_flight = false;
-                    }
-                });
+            // Use blocking_lock to avoid the unreliable try_write + spawn pattern
+            let mut guard = states.blocking_lock();
+            if let Some(state) = guard.get_mut(&url) {
+                state.in_flight = false;
             }
         }
     }
@@ -99,8 +92,8 @@ impl BookService {
             parser,
             cache,
             storage_dir,
-            source_cookies: Arc::new(RwLock::new(HashMap::new())),
-            rate_states: Arc::new(RwLock::new(HashMap::new())),
+            source_cookies: Arc::new(Mutex::new(HashMap::new())),
+            rate_states: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -119,7 +112,7 @@ impl BookService {
         headers: &mut Vec<(String, String)>,
     ) {
         let key = self.source_cookie_key(user_ns, &source.book_source_url);
-        if let Some(cookie) = self.source_cookies.read().await.get(&key).cloned() {
+        if let Some(cookie) = self.source_cookies.lock().await.get(&key).cloned() {
             if !headers
                 .iter()
                 .any(|(name, _)| name.eq_ignore_ascii_case("cookie"))
@@ -136,14 +129,14 @@ impl BookService {
         }
         let key = self.source_cookie_key(user_ns, source_url);
         self.source_cookies
-            .write()
+            .lock()
             .await
             .insert(key, cookie.to_string());
     }
 
     pub async fn clear_source_cookie(&self, user_ns: &str, source_url: &str) {
         let key = self.source_cookie_key(user_ns, source_url);
-        self.source_cookies.write().await.remove(&key);
+        self.source_cookies.lock().await.remove(&key);
     }
 
     async fn fetch_source_url(
@@ -196,7 +189,7 @@ impl BookService {
         let delay = Duration::from_millis(delay_ms);
         loop {
             let wait = {
-                let mut states = self.rate_states.write().await;
+                let mut states = self.rate_states.lock().await;
                 let state = states.entry(source_key.to_string()).or_default();
                 let now = Instant::now();
                 if state.in_flight {
@@ -233,7 +226,7 @@ impl BookService {
         let window = Duration::from_millis(window_ms);
         loop {
             let wait = {
-                let mut states = self.rate_states.write().await;
+                let mut states = self.rate_states.lock().await;
                 let state = states.entry(source_key.to_string()).or_default();
                 let now = Instant::now();
                 state
@@ -255,7 +248,7 @@ impl BookService {
     }
 
     async fn finish_rate(&self, source: &BookSource) {
-        let mut states = self.rate_states.write().await;
+        let mut states = self.rate_states.lock().await;
         if let Some(state) = states.get_mut(&source.book_source_url) {
             state.in_flight = false;
         }
@@ -1050,13 +1043,8 @@ impl BookService {
         chapter_urls: &[String],
     ) -> Result<usize, AppError> {
         let book_key = md5_hex(book_url);
-        let mut count = 0usize;
-        for url in chapter_urls {
-            if self.cache.exists(user_ns, &book_key, url).await {
-                count += 1;
-            }
-        }
-        Ok(count)
+        let found = self.cache.exists_batch(user_ns, &book_key, chapter_urls).await;
+        Ok(found.len())
     }
 
     pub async fn cache_chapter(
@@ -1730,7 +1718,7 @@ mod tests {
             storage_dir.to_str().unwrap(),
         );
         let now = Instant::now();
-        service.rate_states.write().await.insert(
+        service.rate_states.lock().await.insert(
             "source".to_string(),
             RateState {
                 window_starts: vec![now, now],

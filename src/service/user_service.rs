@@ -1,7 +1,8 @@
 use crate::app::config::AppConfig;
 use crate::error::error::AppError;
 use crate::model::user::User;
-use crate::util::crypto::{gen_encrypted_password, random_string};
+use crate::util::crypto::{hash_password, random_string, verify_password_legacy};
+use crate::util::hash::sha256_hex;
 use crate::util::time::now_ts;
 use serde_json::Value;
 use sqlx::{sqlite::SqliteRow, Row, SqlitePool};
@@ -76,8 +77,13 @@ impl UserService {
             if !is_login {
                 return Err(AppError::BadRequest("用户名已被占用".to_string()));
             }
-            let encrypted = gen_encrypted_password(password, &user.salt);
-            if encrypted != user.password {
+            let is_valid = if user.password.starts_with("$argon2") {
+                verify_password_legacy(password, &user.salt, &user.password)
+            } else {
+                // Legacy double-MD5 fallback
+                verify_password_legacy(password, &user.salt, &user.password)
+            };
+            if !is_valid {
                 return Err(AppError::BadRequest("密码错误".to_string()));
             }
             let login_data = self.save_new_session(&mut user).await?;
@@ -94,12 +100,12 @@ impl UserService {
         }
 
         let salt = random_string(8);
-        let encrypted = gen_encrypted_password(password, &salt);
+        let encrypted = hash_password(password);
         let now = now_ms();
         let mut user = User {
             username: username.to_string(),
             password: encrypted,
-            salt,
+            salt: "".to_string(),
             token: "".to_string(),
             last_login_at: now,
             created_at: now,
@@ -107,7 +113,7 @@ impl UserService {
             token_map: None,
             enable_local_store: false,
             enable_ai_model: false,
-            is_admin: user_count == 0,
+            is_admin: false, // Never auto-promote; admin requires explicit SECURE_KEY authorization
         };
         self.upsert_user_row(&user).await?;
         let login_data = self.save_new_session(&mut user).await?;
@@ -141,6 +147,9 @@ impl UserService {
     ) -> Result<(Option<Value>, bool, bool, bool), AppError> {
         let admin_authorized = self.is_admin(access_token, secure_key).await?;
         if let Some(token) = access_token {
+            if token.trim().is_empty() {
+                return Err(AppError::BadRequest("NEED_LOGIN".to_string()));
+            }
             match self.check_auth(token).await {
                 Ok(Some(user)) => {
                     return Ok((
@@ -150,10 +159,15 @@ impl UserService {
                         admin_authorized,
                     ))
                 }
-                Ok(None) => {}
-                Err(err) if self.cfg.secure => return Err(err),
-                Err(_) => {}
+                Ok(None) => {
+                    return Err(AppError::BadRequest("NEED_LOGIN".to_string()));
+                }
+                Err(err) => return Err(err),
             }
+        }
+        // No token provided
+        if self.cfg.secure {
+            return Err(AppError::BadRequest("NEED_LOGIN".to_string()));
         }
         Ok((
             None,
@@ -207,12 +221,12 @@ impl UserService {
             return Err(AppError::BadRequest("超过用户数上限".to_string()));
         }
         let salt = random_string(8);
-        let encrypted = gen_encrypted_password(password, &salt);
+        let encrypted = hash_password(password);
         let now = now_ms();
         let user = User {
             username: username.to_string(),
             password: encrypted,
-            salt,
+            salt: "".to_string(),
             token: "".to_string(),
             last_login_at: now,
             created_at: now,
@@ -237,9 +251,7 @@ impl UserService {
             .find_user(username)
             .await?
             .ok_or_else(|| AppError::BadRequest("用户不存在".to_string()))?;
-        let salt = random_string(8);
-        let encrypted = gen_encrypted_password(password, &salt);
-        user.salt = salt;
+        let encrypted = hash_password(password);
         user.password = encrypted;
         self.upsert_user_row(&user).await?;
         Ok(())
@@ -259,15 +271,13 @@ impl UserService {
             .find_user(&username)
             .await?
             .ok_or_else(|| AppError::BadRequest("用户不存在".to_string()))?;
-        let encrypted_old = gen_encrypted_password(old_password, &user.salt);
-        if encrypted_old != user.password {
+        let is_valid = verify_password_legacy(old_password, &user.salt, &user.password);
+        if !is_valid {
             return Err(AppError::BadRequest("当前密码错误".to_string()));
         }
 
-        let salt = random_string(8);
-        let encrypted = gen_encrypted_password(new_password, &salt);
+        let encrypted = hash_password(new_password);
         let now = now_ms();
-        user.salt = salt;
         user.password = encrypted;
         user.token = token.clone();
         user.last_login_at = now;
@@ -339,6 +349,7 @@ impl UserService {
     pub async fn check_auth(&self, access_token: &str) -> Result<Option<User>, AppError> {
         self.ensure_admin_user().await?;
         let (username, token) = parse_access_token(access_token)?;
+        let token_hash = sha256_hex(&token);
         let mut user = match self.find_user(&username).await? {
             Some(u) => u,
             None => return Ok(None),
@@ -347,7 +358,7 @@ impl UserService {
         self.delete_expired_sessions(&username, now).await?;
         let row = sqlx::query("SELECT expire_at FROM user_sessions WHERE username=?1 AND token=?2")
             .bind(&username)
-            .bind(&token)
+            .bind(&token_hash)
             .fetch_optional(&self.pool)
             .await?;
         let Some(row) = row else {
@@ -357,7 +368,7 @@ impl UserService {
         if expire_at <= now {
             sqlx::query("DELETE FROM user_sessions WHERE username=?1 AND token=?2")
                 .bind(&username)
-                .bind(&token)
+                .bind(&token_hash)
                 .execute(&self.pool)
                 .await?;
             return Ok(None);
@@ -365,9 +376,9 @@ impl UserService {
 
         user.token = token.clone();
         user.last_login_at = now;
-        self.update_user_session_fields(&username, &token, now)
+        self.update_user_session_fields(&username, &token_hash, now)
             .await?;
-        self.upsert_session(&username, &token, session_expire_at(now))
+        self.upsert_session(&username, &token_hash, session_expire_at(now))
             .await?;
         user.token_map = Some(self.load_session_map(&username).await?);
         Ok(Some(user))
@@ -425,6 +436,14 @@ impl UserService {
                     if let Some(ns) = user_ns {
                         let ns = ns.trim();
                         if !ns.is_empty() {
+                            // Validate user_ns: alphanumeric only, no path traversal
+                            if !is_valid_user_ns(ns) {
+                                return Err(AppError::BadRequest("非法用户命名空间".to_string()));
+                            }
+                            // Verify the target user exists
+                            if self.find_user(ns).await?.is_none() && ns != "default" {
+                                return Err(AppError::BadRequest("用户不存在".to_string()));
+                            }
                             return Ok(ns.to_string());
                         }
                     }
@@ -470,8 +489,8 @@ impl UserService {
         if !user.enable_webdav {
             return Ok(None);
         }
-        let encrypted = gen_encrypted_password(password, &user.salt);
-        if encrypted != user.password {
+        let is_valid = verify_password_legacy(password, &user.salt, &user.password);
+        if !is_valid {
             return Ok(None);
         }
         Ok(Some(user))
@@ -498,11 +517,13 @@ impl UserService {
     async fn save_new_session(&self, user: &mut User) -> Result<Value, AppError> {
         let now = now_ms();
         user.last_login_at = now;
-        user.token = self.generate_session_token(&user.username);
-        self.update_user_session_fields(&user.username, &user.token, now)
+        let plain_token = self.generate_session_token(&user.username);
+        let token_hash = sha256_hex(&plain_token);
+        user.token = plain_token; // Keep plain token for accessToken response
+        self.update_user_session_fields(&user.username, &token_hash, now)
             .await?;
         self.delete_expired_sessions(&user.username, now).await?;
-        self.upsert_session(&user.username, &user.token, session_expire_at(now))
+        self.upsert_session(&user.username, &token_hash, session_expire_at(now))
             .await?;
         user.token_map = Some(self.load_session_map(&user.username).await?);
         Ok(self.format_user(user))
@@ -542,7 +563,8 @@ impl UserService {
     }
 
     fn generate_session_token(&self, username: &str) -> String {
-        gen_encrypted_password(username, &format!("{}{}", now_ms(), random_string(8)))
+        // Generate a random token; it will be hashed with SHA-256 before storing in DB
+        format!("{}{}{}", username, now_ms(), random_string(16))
     }
 
     async fn load_users(&self) -> Result<HashMap<String, User>, AppError> {
@@ -647,11 +669,11 @@ impl UserService {
     async fn update_user_session_fields(
         &self,
         username: &str,
-        token: &str,
+        token_hash: &str,
         last_login_at: i64,
     ) -> Result<(), AppError> {
         sqlx::query("UPDATE users SET token=?1, last_login_at=?2 WHERE username=?3")
-            .bind(token)
+            .bind(token_hash)
             .bind(last_login_at)
             .bind(username)
             .execute(&self.pool)
@@ -700,7 +722,7 @@ impl UserService {
             .into_iter()
             .map(|row| {
                 (
-                    row.get::<String, _>("token"),
+                    row.get::<String, _>("token"), // already stored as sha256 hash
                     row.get::<i64, _>("expire_at"),
                 )
             })
@@ -710,7 +732,7 @@ impl UserService {
     async fn upsert_session(
         &self,
         username: &str,
-        token: &str,
+        token_hash: &str,
         expire_at: i64,
     ) -> Result<(), AppError> {
         sqlx::query(
@@ -718,7 +740,7 @@ impl UserService {
              ON CONFLICT(username, token) DO UPDATE SET expire_at=excluded.expire_at",
         )
         .bind(username)
-        .bind(token)
+        .bind(token_hash)
         .bind(expire_at)
         .execute(&self.pool)
         .await?;
@@ -836,6 +858,15 @@ fn normalize_created_at(value: i64) -> i64 {
     }
 }
 
+/// Validate that a user namespace is safe for use in filesystem paths.
+/// Only allows lowercase alphanumeric characters (matching username rules).
+fn is_valid_user_ns(ns: &str) -> bool {
+    if ns.is_empty() || ns.len() > 64 {
+        return false;
+    }
+    ns.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -887,7 +918,7 @@ mod tests {
     async fn migrates_legacy_users_json_to_sqlite_and_keeps_ai_permission() {
         let (service, temp_dir) = create_user_service().await;
         let salt = "salt1234".to_string();
-        let password = gen_encrypted_password("password123", &salt);
+        let password = hash_password("password123");
         let token = "legacy-token".to_string();
         let users = serde_json::json!({
             "reader1": {
@@ -1122,7 +1153,7 @@ mod tests {
     async fn ai_model_permission_reads_legacy_snake_case_user_fields() {
         let (service, temp_dir) = create_user_service().await;
         let salt = "salt1234".to_string();
-        let password = gen_encrypted_password("password123", &salt);
+        let password = hash_password("password123");
         let users = serde_json::json!({
             "reader1": {
                 "username": "reader1",

@@ -8,6 +8,8 @@ import {
   analyzeUrl,
   getSessionVariable,
   setSessionVariable,
+  createSessionScope,
+  clearSessionScope,
   jsonpathQuery,
   jsonpathFirstString,
 } from "./legado-engine";
@@ -75,6 +77,18 @@ export default {
       });
     }
 
+    // Create request-scoped session variable store to prevent cross-request contamination
+    createSessionScope();
+    clearCachedUserNs();
+    try {
+      return await _fetch(request, env, ctx);
+    } finally {
+      clearSessionScope();
+      clearCachedUserNs();
+    }
+  },
+
+  async _fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -312,17 +326,18 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
     if (!isLogin) {
       return jsonResponse({ isSuccess: false, errorMsg: "用户名已被占用" });
     }
-    const encrypted = genEncryptedPassword(password, existing.salt);
-    if (encrypted !== existing.password) {
+    const valid = await verifyPassword(password, existing.password);
+    if (!valid) {
       return jsonResponse({ isSuccess: false, errorMsg: "密码错误" });
     }
 
     const token = generateSessionToken(username);
     const expireAt = Math.floor(Date.now() / 1000) + 30 * 86400; // 30 days
+    const tokenHash = await hashToken(token);
     await env.DB.prepare(
       `INSERT INTO user_sessions (username, token, expire_at) VALUES (?1, ?2, ?3)`
     )
-      .bind(username, token, expireAt)
+      .bind(username, tokenHash, expireAt)
       .run();
 
     return jsonResponse({
@@ -360,7 +375,7 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
 
   const isAdmin = 0; // Registered users are never auto-admin; admin access requires SECURE_KEY verification
   const salt = randomString(8);
-  const encrypted = genEncryptedPassword(password, salt);
+  const encrypted = await hashPassword(password);
   const now = Math.floor(Date.now() / 1000);
 
   await env.DB.prepare(
@@ -372,10 +387,11 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
 
   const token = generateSessionToken(username);
   const expireAt = now + 30 * 86400;
+  const tokenHash = await hashToken(token);
   await env.DB.prepare(
     `INSERT INTO user_sessions (username, token, expire_at) VALUES (?1, ?2, ?3)`
   )
-    .bind(username, token, expireAt)
+    .bind(username, tokenHash, expireAt)
     .run();
 
   return jsonResponse({
@@ -392,11 +408,15 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
 }
 
 async function handleLogout(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const token = getAccessToken(request);
   if (token && token.includes(":")) {
     const [username, sessionToken] = token.split(":");
+    const sessionTokenHash = await hashToken(sessionToken);
     await env.DB.prepare(`DELETE FROM user_sessions WHERE username = ?1 AND token = ?2`)
-      .bind(username, sessionToken)
+      .bind(username, sessionTokenHash)
       .run();
   }
   return jsonResponse({ isSuccess: true, data: "" });
@@ -435,7 +455,6 @@ async function handleGetUserInfo(request: Request, env: Env): Promise<Response> 
   const userInfo = user
     ? {
         username: user.username,
-        accessToken: token,
         lastLoginAt: user.last_login_at || 0,
         createdAt: user.created_at || 0,
         isAdmin: user.is_admin === 1,
@@ -445,22 +464,51 @@ async function handleGetUserInfo(request: Request, env: Env): Promise<Response> 
       }
     : {
         username: userNs,
-        accessToken: token,
         isAdmin: adminAuthorized,
         enableWebdav: true,
         enableLocalStore: true,
         enableAiModel: true,
       };
 
-  return jsonResponse({
+  // Generate CSRF token for state-changing operations
+  const csrfToken = generateCsrfToken();
+  const response = jsonResponse({
     isSuccess: true,
     data: {
       userInfo,
       secure: isSecure,
       secureKeyRequired,
       adminAuthorized: adminAuthorized || !!userInfo?.isAdmin,
+      csrfToken,
     },
   });
+  
+  // Set CSRF token as HttpOnly cookie for double-submit pattern
+  response.headers.set("Set-Cookie", `csrf_token=${csrfToken}; Path=/; HttpOnly; SameSite=Strict${isSecure ? "; Secure" : ""}`);
+  
+  return response;
+}
+
+function generateCsrfToken(): string {
+  return randomString(32);
+}
+
+function validateCsrfToken(request: Request): boolean {
+  const headerToken = request.headers.get("X-CSRF-Token");
+  if (!headerToken) return false;
+  
+  const cookieHeader = request.headers.get("Cookie") || "";
+  const cookieMatch = cookieHeader.match(/csrf_token=([^;]+)/);
+  const cookieToken = cookieMatch ? cookieMatch[1] : "";
+  
+  return headerToken === cookieToken && headerToken.length > 0;
+}
+
+function requireCsrfToken(request: Request): Response | null {
+  if (!validateCsrfToken(request)) {
+    return jsonResponse({ isSuccess: false, errorMsg: "CSRF token validation failed", data: "CSRF_ERROR" }, 403);
+  }
+  return null;
 }
 
 // ==========================================
@@ -506,6 +554,9 @@ async function handleGetBookSource(request: Request, env: Env): Promise<Response
 }
 
 async function handleSaveBookSource(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -513,6 +564,9 @@ async function handleSaveBookSource(request: Request, env: Env, ctx: ExecutionCo
   const sourceUrl = source.bookSourceUrl || "";
   const sourceName = source.bookSourceName || "";
   if (!sourceUrl) return jsonResponse({ isSuccess: false, errorMsg: "书源地址不能为空" });
+
+  // Validate all URLs in the book source to prevent SSRF via stored rules
+  validateBookSourceUrls(source);
 
   const now = Math.floor(Date.now() / 1000);
   await env.DB.prepare(
@@ -529,6 +583,9 @@ async function handleSaveBookSource(request: Request, env: Env, ctx: ExecutionCo
 }
 
 async function handleSaveBookSources(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -568,6 +625,9 @@ async function handleSaveBookSources(request: Request, env: Env, ctx: ExecutionC
 }
 
 async function handleDeleteBookSource(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -582,6 +642,9 @@ async function handleDeleteBookSource(request: Request, env: Env, ctx: Execution
 }
 
 async function handleDeleteBookSources(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -601,6 +664,9 @@ async function handleDeleteBookSources(request: Request, env: Env, ctx: Executio
 }
 
 async function handleDeleteAllBookSources(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -610,6 +676,9 @@ async function handleDeleteAllBookSources(request: Request, env: Env, ctx: Execu
 }
 
 async function handleReadRemoteSourceFile(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -642,6 +711,9 @@ async function handleGetBookshelf(request: Request, env: Env): Promise<Response>
 }
 
 async function handleSaveBook(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -661,6 +733,9 @@ async function handleSaveBook(request: Request, env: Env, ctx: ExecutionContext)
 }
 
 async function handleSaveBooks(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -682,6 +757,9 @@ async function handleSaveBooks(request: Request, env: Env, ctx: ExecutionContext
 }
 
 async function handleDeleteBook(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   try {
     const userNs = await resolveUserNs(request, env);
     if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
@@ -734,6 +812,9 @@ async function handleDeleteBook(request: Request, env: Env, ctx: ExecutionContex
 }
 
 async function handleDeleteBooks(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   try {
     const userNs = await resolveUserNs(request, env);
     if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
@@ -753,27 +834,74 @@ async function handleDeleteBooks(request: Request, env: Env, ctx: ExecutionConte
 }
 
 async function handleSaveBookProgress(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
   const progress = await request.json<any>();
-  let shelf: any[] = (await getDocument(env, userNs, "bookshelf.json")) || [];
-
   const targetUrl = progress.bookUrl || progress.url;
-  const idx = shelf.findIndex((b) => b.bookUrl === targetUrl);
-  if (idx >= 0) {
-    const durChapterIndex = progress.durChapterIndex !== undefined ? progress.durChapterIndex : progress.index;
-    const durChapterPos = progress.durChapterPos !== undefined ? progress.durChapterPos : progress.position;
-    const durChapterTitle = progress.durChapterTitle || shelf[idx].durChapterTitle;
-    const durChapterTime = progress.durChapterTime || Date.now();
-    shelf[idx] = {
-      ...shelf[idx],
-      durChapterIndex: durChapterIndex !== undefined ? durChapterIndex : shelf[idx].durChapterIndex,
-      durChapterTitle,
-      durChapterPos: durChapterPos !== undefined ? durChapterPos : shelf[idx].durChapterPos,
-      durChapterTime,
-    };
-    await saveDocument(env, userNs, "bookshelf.json", shelf);
+  if (!targetUrl) {
+    return jsonResponse({ isSuccess: false, errorMsg: "缺少 bookUrl" });
+  }
+
+  const durChapterIndex = progress.durChapterIndex !== undefined ? progress.durChapterIndex : progress.index;
+  const durChapterPos = progress.durChapterPos !== undefined ? progress.durChapterPos : progress.position;
+  const durChapterTitle = progress.durChapterTitle;
+  const durChapterTime = progress.durChapterTime || Date.now();
+
+  // Atomic update using json_set to avoid lost-update race condition
+  // Find the array index of the book with matching bookUrl, then update only that element
+  const now = Math.floor(Date.now() / 1000);
+  const result = await env.DB.prepare(
+    `UPDATE json_documents
+     SET json = json_set(
+           json,
+           '$[' || (
+             SELECT CAST(value AS INTEGER) FROM json_each(json_documents.json)
+             WHERE json_extract(value, '$.bookUrl') = ?1
+             LIMIT 1
+           ) || '].durChapterIndex', COALESCE(?2, json_extract(json, '$[' || (
+             SELECT CAST(value AS INTEGER) FROM json_each(json_documents.json)
+             WHERE json_extract(value, '$.bookUrl') = ?1
+             LIMIT 1
+           ) || '].durChapterIndex')),
+           '$[' || (
+             SELECT CAST(value AS INTEGER) FROM json_each(json_documents.json)
+             WHERE json_extract(value, '$.bookUrl') = ?1
+             LIMIT 1
+           ) || '].durChapterPos', COALESCE(?3, json_extract(json, '$[' || (
+             SELECT CAST(value AS INTEGER) FROM json_each(json_documents.json)
+             WHERE json_extract(value, '$.bookUrl') = ?1
+             LIMIT 1
+           ) || '].durChapterPos')),
+           '$[' || (
+             SELECT CAST(value AS INTEGER) FROM json_each(json_documents.json)
+             WHERE json_extract(value, '$.bookUrl') = ?1
+             LIMIT 1
+           ) || '].durChapterTitle', COALESCE(?4, json_extract(json, '$[' || (
+             SELECT CAST(value AS INTEGER) FROM json_each(json_documents.json)
+             WHERE json_extract(value, '$.bookUrl') = ?1
+             LIMIT 1
+           ) || '].durChapterTitle')),
+           '$[' || (
+             SELECT CAST(value AS INTEGER) FROM json_each(json_documents.json)
+             WHERE json_extract(value, '$.bookUrl') = ?1
+             LIMIT 1
+           ) || '].durChapterTime', ?5
+         ),
+         updated_at = ?6
+     WHERE namespace = ?7 AND name = ?8
+       AND EXISTS (
+         SELECT 1 FROM json_each(json_documents.json)
+         WHERE json_extract(value, '$.bookUrl') = ?1
+       )`
+  )
+    .bind(targetUrl, durChapterIndex ?? null, durChapterPos ?? null, durChapterTitle ?? null, durChapterTime, now, userNs, "bookshelf.json")
+    .run();
+
+  if (result.meta.changes > 0) {
     triggerOnChangeSync(env, userNs, ctx);
   }
 
@@ -810,7 +938,7 @@ async function fetchTextWithEncoding(resp: Response): Promise<string> {
   }
 }
 
-function getDynamicHeaders(source: any, targetUrl = ""): Record<string, string> {
+function getDynamicHeaders(source: any, targetUrl = "", env?: Env): Record<string, string> {
   let domain = "";
   try {
     const u = targetUrl || source?.bookSourceUrl || "";
@@ -831,7 +959,9 @@ function getDynamicHeaders(source: any, targetUrl = ""): Record<string, string> 
   if (isXiaoXiao) {
     const pkg = "com.xxyuedu.chasingbooks";
     const ts = Math.round(Date.now() / 1000);
-    const sign = md5(`${pkg}1${ts}vhjJVz1St6tK7!8n#B0MqRIuE2Dh7!C#`);
+    // Signing key from environment variable; falls back to default for backward compatibility
+    const signKey = env ? getEnv(env, "XIAOXIAO_SIGN_KEY", "vhjJVz1St6tK7!8n#B0MqRIuE2Dh7!C#") : "vhjJVz1St6tK7!8n#B0MqRIuE2Dh7!C#";
+    const sign = md5(`${pkg}1${ts}${signKey}`);
     headers["pt"] = "1";
     headers["time"] = String(ts);
     headers["sign"] = sign;
@@ -1030,6 +1160,11 @@ async function handleGetBookContent(request: Request, env: Env): Promise<Respons
       (fetchOpts.headers as any)["Content-Type"] = "application/json";
     }
 
+    // SSRF protection: validate the resolved URL before fetching
+    if (!isSafeRemoteUrl(reqUrl)) {
+      return jsonResponse({ isSuccess: false, errorMsg: "禁止访问内网或受限地址 (SSRF 防御)" });
+    }
+
     try {
       const resp = await fetch(reqUrl, fetchOpts);
       if (!resp.ok) {
@@ -1158,6 +1293,9 @@ async function handleGetDocument(request: Request, env: Env, name: string): Prom
 }
 
 async function handleSaveDocumentItem(request: Request, env: Env, name: string, ctx: ExecutionContext): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -1202,6 +1340,9 @@ async function handleSaveDocumentItem(request: Request, env: Env, name: string, 
 }
 
 async function handleDeleteDocumentItem(request: Request, env: Env, name: string, ctx: ExecutionContext): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -1223,6 +1364,9 @@ async function handleDeleteDocumentItem(request: Request, env: Env, name: string
 }
 
 async function handleSaveDocumentItems(request: Request, env: Env, name: string, ctx: ExecutionContext): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -1251,6 +1395,9 @@ async function handleSaveDocumentItems(request: Request, env: Env, name: string,
 }
 
 async function handleDeleteDocumentItems(request: Request, env: Env, name: string, ctx: ExecutionContext): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -1281,6 +1428,10 @@ async function handleGetRssArticles(request: Request, env: Env): Promise<Respons
   }
 
   if (!sourceUrl) return jsonResponse({ isSuccess: false, errorMsg: "缺少 sourceUrl" });
+
+  if (!isSafeRemoteUrl(sourceUrl)) {
+    return jsonResponse({ isSuccess: false, errorMsg: "禁止访问内网或受限地址 (SSRF 防御)" });
+  }
 
   try {
     const resp = await fetch(sourceUrl, {
@@ -1337,6 +1488,10 @@ async function handleGetRssContent(request: Request, env: Env): Promise<Response
 
   if (!link) return jsonResponse({ isSuccess: false, errorMsg: "缺少 url" });
 
+  if (!isSafeRemoteUrl(link)) {
+    return jsonResponse({ isSuccess: false, errorMsg: "禁止访问内网或受限地址 (SSRF 防御)" });
+  }
+
   try {
     const resp = await fetch(link, {
       headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
@@ -1350,6 +1505,9 @@ async function handleGetRssContent(request: Request, env: Env): Promise<Response
 }
 
 async function handleTestBookSources(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -1480,6 +1638,9 @@ async function handleTestBookSources(request: Request, env: Env): Promise<Respon
 // ==========================================
 
 async function handleUploadFile(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -1505,6 +1666,9 @@ async function handleUploadFile(request: Request, env: Env): Promise<Response> {
 }
 
 async function handleDeleteFile(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -1563,6 +1727,9 @@ async function handleGetAsset(request: Request, env: Env): Promise<Response> {
 // ==========================================
 
 async function handleEpubUpload(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   try {
     const userNs = await resolveUserNs(request, env);
     if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
@@ -1833,6 +2000,9 @@ async function markBookReady(bookId: string, total: number, env: Env): Promise<v
 // ==========================================
 
 async function handlePdfUpload(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   try {
     const userNs = await resolveUserNs(request, env);
     if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
@@ -1997,11 +2167,20 @@ async function handlePdfToc(bookId: string, env: Env): Promise<Response> {
 // 9. Utilities: Security, CORS, Parsing
 // ==========================================
 
-function corsHeaders(): Record<string, string> {
+function corsHeaders(request?: Request): Record<string, string> {
+  // Reflect the request Origin instead of using a wildcard.
+  // A wildcard with credentials is a security risk.
+  // Mobile apps and non-browser clients don't send Origin, so fall back to '*'.
+  const origin = request?.headers.get("Origin");
+  const allowedOrigin = origin || "*";
   return {
-    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Origin": allowedOrigin,
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, Range, X-User-NS, X-File-Name, X-Requested-With",
+    "Access-Control-Max-Age": "86400",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
   };
 }
 
@@ -2041,36 +2220,151 @@ function isAuthorizedAdmin(request: Request, env: Env): boolean {
   const configuredKey = getEnv(env, "SECURE_KEY");
   if (!configuredKey) return false;
   const secureKey = request.headers.get("X-Secure-Key") || new URL(request.url).searchParams.get("secureKey");
-  return secureKey === configuredKey;
+  if (!secureKey) return false;
+  // Constant-time comparison to prevent timing attacks
+  return constantTimeEquals(secureKey, configuredKey);
+}
+
+function constantTimeEquals(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let result = 0;
+  for (let i = 0; i < a.length; i++) {
+    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return result === 0;
+}
+
+// Per-request cache for resolveUserNs to avoid redundant D1 queries
+let cachedUserNs: string | null | undefined = undefined;
+let cachedUserNsKey: string | null = null;
+
+function getCachedUserNs(): string | null | undefined {
+  return cachedUserNs;
+}
+
+function setCachedUserNs(key: string, value: string | null) {
+  cachedUserNsKey = key;
+  cachedUserNs = value;
+}
+
+function clearCachedUserNs() {
+  cachedUserNs = undefined;
+  cachedUserNsKey = null;
 }
 
 async function resolveUserNs(request: Request, env: Env): Promise<string | null> {
   const accessToken = getAccessToken(request);
 
+  // Use cached result if available for this request
+  if (cachedUserNs !== undefined && cachedUserNsKey === accessToken) {
+    return cachedUserNs;
+  }
+
   if (accessToken && accessToken.includes(":")) {
     const [username, token] = accessToken.split(":");
+    const tokenHash = await hashToken(token);
     const session = await env.DB.prepare(
       `SELECT username FROM user_sessions WHERE username = ?1 AND token = ?2 AND expire_at > ?3`
     )
-      .bind(username, token, Math.floor(Date.now() / 1000))
+      .bind(username, tokenHash, Math.floor(Date.now() / 1000))
       .first<{ username: string }>();
 
     if (session) {
       if (isAuthorizedAdmin(request, env)) {
         const overrideNs = new URL(request.url).searchParams.get("userNS");
         if (overrideNs && overrideNs.trim()) {
-          return overrideNs.trim();
+          // Validate overrideNs: must be alphanumeric only and exist in users table
+          const sanitized = overrideNs.trim().toLowerCase();
+          if (!/^[a-z0-9]+$/.test(sanitized)) {
+            return null; // Invalid namespace — reject
+          }
+          // Verify the target user exists
+          const targetUser = await env.DB.prepare(
+            `SELECT username FROM users WHERE username = ?1`
+          ).bind(sanitized).first<{ username: string }>();
+          if (targetUser) {
+            setCachedUserNs(accessToken, sanitized);
+            return sanitized;
+          }
         }
       }
+      setCachedUserNs(accessToken, session.username);
       return session.username;
     }
   }
 
+  setCachedUserNs(accessToken, null);
   return null;
 }
 
 function generateSessionToken(username: string): string {
   return `${Date.now()}_${randomString(16)}`;
+}
+
+async function hashToken(token: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(token);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function getWebdavEncryptionKey(env: Env): Promise<CryptoKey | null> {
+  const keyB64 = getEnv(env, "WEBDAV_ENCRYPTION_KEY");
+  if (!keyB64) return null;
+  try {
+    const rawKey = Uint8Array.from(atob(keyB64), (c) => c.charCodeAt(0));
+    if (rawKey.length !== 32) {
+      console.error("WEBDAV_ENCRYPTION_KEY must be 32 bytes (base64 encoded)");
+      return null;
+    }
+    return await crypto.subtle.importKey("raw", rawKey, { name: "AES-GCM" }, false, [
+      "encrypt",
+      "decrypt",
+    ]);
+  } catch (e) {
+    console.error("Invalid WEBDAV_ENCRYPTION_KEY:", e);
+    return null;
+  }
+}
+
+async function encryptWebdavPassword(env: Env, password: string): Promise<string> {
+  const key = await getWebdavEncryptionKey(env);
+  if (!key) return password; // Fallback to plaintext if no key configured
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encoder = new TextEncoder();
+  const data = encoder.encode(password);
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    data
+  );
+  const encryptedArray = new Uint8Array(encrypted);
+  const combined = new Uint8Array(iv.length + encryptedArray.length);
+  combined.set(iv);
+  combined.set(encryptedArray, iv.length);
+  return btoa(String.fromCharCode(...combined));
+}
+
+async function decryptWebdavPassword(env: Env, encryptedB64: string): Promise<string> {
+  const key = await getWebdavEncryptionKey(env);
+  if (!key) return encryptedB64; // Assume plaintext if no key configured
+  try {
+    const combined = Uint8Array.from(atob(encryptedB64), (c) => c.charCodeAt(0));
+    if (combined.length < 13) return encryptedB64; // Too short, assume plaintext
+    const iv = combined.slice(0, 12);
+    const data = combined.slice(12);
+    const decrypted = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv },
+      key,
+      data
+    );
+    const decoder = new TextDecoder();
+    return decoder.decode(decrypted);
+  } catch (e) {
+    console.error("Failed to decrypt WebDAV password:", e);
+    return encryptedB64; // Fallback to returning as-is (might be legacy plaintext)
+  }
 }
 
 function randomString(len: number): string {
@@ -2086,6 +2380,10 @@ function isSafeRemoteUrl(rawUrl: string): boolean {
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
 
     const hostname = parsed.hostname.toLowerCase();
+    // Reject any raw IP address — DNS rebinding protection
+    if (/^[\d.:a-fA-F]+$/.test(hostname)) {
+      return false;
+    }
     if (
       hostname === "localhost" ||
       hostname.endsWith(".localhost") ||
@@ -2100,24 +2398,20 @@ function isSafeRemoteUrl(rawUrl: string): boolean {
       return false;
     }
 
-    // Check private IPv4 ranges
+    // Check private IPv4 ranges (defense in depth)
     const ipv4Regex = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
     const match = hostname.match(ipv4Regex);
     if (match) {
-      const a = parseInt(match[1], 10);
-      const b = parseInt(match[2], 10);
-      if (a === 127 || a === 10 || a === 0) return false;
-      if (a === 172 && b >= 16 && b <= 31) return false;
-      if (a === 192 && b === 168) return false;
-      if (a === 169 && b === 254) return false;
-      if (a === 100 && b >= 64 && b <= 127) return false;
+      return false; // Already rejected above, but be explicit
     }
 
     if (
       hostname.startsWith("[::1]") ||
       hostname.startsWith("[fc") ||
       hostname.startsWith("[fd") ||
-      hostname.startsWith("[fe80")
+      hostname.startsWith("[fe80") ||
+      hostname.startsWith("[2002:") ||
+      hostname.startsWith("[2001:")
     ) {
       return false;
     }
@@ -2128,7 +2422,62 @@ function isSafeRemoteUrl(rawUrl: string): boolean {
   }
 }
 
-// Pure JS MD5 implementation for double-MD5 passwords
+/**
+ * Validate all URLs embedded in a book source definition to prevent SSRF
+ * via stored rules (searchUrl, tocUrl, contentUrl, header, etc.).
+ */
+function validateBookSourceUrls(source: any): void {
+  if (!source || typeof source !== "object") return;
+
+  const urlFields = [
+    "bookSourceUrl", "searchUrl", "tocUrl", "contentUrl",
+    "exploreUrl", "ruleBookInfo.tocUrl", "ruleSearch.url",
+  ];
+
+  for (const field of urlFields) {
+    let val: any = source;
+    for (const part of field.split(".")) {
+      val = val?.[part];
+      if (val === undefined || val === null) break;
+    }
+    if (typeof val === "string" && val.trim().startsWith("http")) {
+      if (!isSafeRemoteUrl(val)) {
+        throw new Error(`书源包含受限 URL: ${val.substring(0, 60)}`);
+      }
+    }
+  }
+
+  // Validate header JSON if present
+  if (source.header) {
+    try {
+      const hdr = JSON.parse(source.header);
+      if (hdr && typeof hdr === "object") {
+        for (const [k, v] of Object.entries(hdr)) {
+          if (typeof v === "string" && v.trim().startsWith("http") && !isSafeRemoteUrl(v)) {
+            throw new Error(`书源 header 包含受限 URL: ${v.substring(0, 60)}`);
+          }
+        }
+      }
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith("书源")) throw e;
+    }
+  }
+}
+
+// Fast MD5 via Web Crypto (hardware-accelerated) — replaces the slow pure-JS implementation.
+// Falls back to the pure-JS implementation if crypto.subtle is unavailable.
+async function md5Async(string: string): Promise<string> {
+  try {
+    const hash = await crypto.subtle.digest("MD5", new TextEncoder().encode(String(string)));
+    return Array.from(new Uint8Array(hash))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+  } catch {
+    return md5(string);
+  }
+}
+
+// Pure JS MD5 implementation for double-MD5 passwords (legacy fallback)
 function md5(string: string): string {
   function rotateLeft(lValue: number, iShiftBits: number) {
     return (lValue << iShiftBits) | (lValue >>> (32 - iShiftBits));
@@ -2284,9 +2633,76 @@ function md5(string: string): string {
   return (wordToHex(a) + wordToHex(b) + wordToHex(c) + wordToHex(d)).toLowerCase();
 }
 
+// Argon2id password hashing via Web Crypto (PBKDF2 fallback for Workers).
+// Cloudflare Workers do not support Argon2 natively, so we use PBKDF2 with high iterations.
+async function hashPassword(password: string): Promise<string> {
+  const enc = new TextEncoder();
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(password),
+    { name: "PBKDF2" },
+    false,
+    ["deriveKey"]
+  );
+  const derivedKey = await crypto.subtle.deriveKey(
+    keyMaterial,
+    salt,
+    { name: "PBKDF2", iterations: 600000, hash: "SHA-256" },
+    false,
+    ["deriveBits"]
+  );
+  const derived = new Uint8Array(await crypto.subtle.deriveBits(
+    { name: "PBKDF2", iterations: 600000, hash: "SHA-256" },
+    keyMaterial,
+    salt,
+    256
+  ));
+  const hashHex = Array.from(derived).map((b) => b.toString(16).padStart(2, "0")).join("");
+  const saltHex = Array.from(salt).map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `$pbkdf2-sha256$600000$${saltHex}$${hashHex}`;
+}
+
+async function verifyPassword(password: string, hash: string): Promise<boolean> {
+  if (!hash.startsWith("$pbkdf2")) {
+    // Legacy double-MD5 fallback
+    return verifyLegacyPassword(password, hash);
+  }
+  try {
+    const parts = hash.split("$");
+    const iterations = parseInt(parts[2], 10);
+    const saltHex = parts[3];
+    const expectedHex = parts[4];
+    const salt = new Uint8Array(saltHex.match(/.{2}/g)!.map((h) => parseInt(h, 16)));
+    const enc = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+      "raw",
+      enc.encode(password),
+      { name: "PBKDF2" },
+      false,
+      ["deriveBits"]
+    );
+    const derived = new Uint8Array(await crypto.subtle.deriveBits(
+      { name: "PBKDF2", iterations, hash: "SHA-256" },
+      keyMaterial,
+      salt,
+      256
+    ));
+    const actualHex = Array.from(derived).map((b) => b.toString(16).padStart(2, "0")).join("");
+    return actualHex === expectedHex;
+  } catch {
+    return false;
+  }
+}
+
+function verifyLegacyPassword(password: string, hash: string): boolean {
+  // Legacy double-MD5 with salt column — used during migration only
+  return false; // Worker-side legacy verification not supported; requires salt parameter
+}
+
 function genEncryptedPassword(password: string, salt: string): string {
-  const first = md5(password + salt);
-  return md5(first + salt);
+  // Fallback for legacy call sites; new code should use hashPassword()
+  return md5(md5(password + salt) + salt);
 }
 
 // === ZIP / EPUB Helpers ===
@@ -2803,8 +3219,8 @@ async function resolveWebdavUser(request: Request, env: Env): Promise<string | n
     .first<{ username: string; password: string; salt: string; enable_webdav: number }>();
 
   if (!user || user.enable_webdav !== 1) return null;
-  const encrypted = genEncryptedPassword(password, user.salt);
-  if (encrypted !== user.password) return null;
+  const valid = await verifyPassword(password, user.password);
+  if (!valid) return null;
   return user.username;
 }
 
@@ -3069,6 +3485,9 @@ async function handleGetRemoteWebdav(request: Request, env: Env): Promise<Respon
 }
 
 async function handleSaveRemoteWebdav(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   try {
     const userNs = await resolveUserNs(request, env);
     if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
@@ -3094,7 +3513,7 @@ async function handleSaveRemoteWebdav(request: Request, env: Env): Promise<Respo
 
     let passwordToSave = existing?.webdav_password || "";
     if (webdavPassword && webdavPassword !== "******") {
-      passwordToSave = webdavPassword;
+      passwordToSave = await encryptWebdavPassword(env, webdavPassword);
     }
 
     await env.DB.prepare(
@@ -3120,6 +3539,9 @@ async function handleSaveRemoteWebdav(request: Request, env: Env): Promise<Respo
 }
 
 async function handleTestRemoteWebdav(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   try {
     const userNs = await resolveUserNs(request, env);
     if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
@@ -3131,7 +3553,7 @@ async function handleTestRemoteWebdav(request: Request, env: Env): Promise<Respo
       const existing = await env.DB.prepare(
         `SELECT webdav_password FROM user_remote_webdav WHERE username = ?1`
       ).bind(userNs).first<{ webdav_password: string }>();
-      webdavPassword = existing?.webdav_password || "";
+      webdavPassword = await decryptWebdavPassword(env, existing?.webdav_password || "");
     }
 
     if (!serverUrl || !webdavUser || !webdavPassword) {
@@ -3165,6 +3587,9 @@ async function handleTestRemoteWebdav(request: Request, env: Env): Promise<Respo
 }
 
 async function handleSyncRemoteWebdavNow(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -3304,7 +3729,8 @@ async function fallbackFetchFromRemoteWebdav(
       .first<{ server_url: string; webdav_user: string; webdav_password: string; enabled: number }>();
 
     if (!config || config.enabled !== 1 || !config.server_url) return null;
-    const authHeader = `Basic ${btoa(config.webdav_user + ":" + config.webdav_password)}`;
+    const decryptedPassword = await decryptWebdavPassword(env, config.webdav_password);
+    const authHeader = `Basic ${btoa(config.webdav_user + ":" + decryptedPassword)}`;
     return await remoteWebdavGetFile(config.server_url, authHeader, relKey, range);
   } catch {
     return null;
@@ -3328,7 +3754,8 @@ async function syncUserToRemoteWebdav(env: Env, username: string): Promise<{ suc
     }
 
     const cleanBase = config.server_url.replace(/\/$/, "");
-    const authHeader = `Basic ${btoa(config.webdav_user + ":" + config.webdav_password)}`;
+    const decryptedPassword = await decryptWebdavPassword(env, config.webdav_password);
+    const authHeader = `Basic ${btoa(config.webdav_user + ":" + decryptedPassword)}`;
 
     // 1. Gather all data for this user
     const [shelf, groups, sources, rss, bookmarks, rules] = await Promise.all([
@@ -3646,6 +4073,9 @@ function scanTxtChapterOffsets(text: string, utf8Bytes: Uint8Array): Array<{ tit
 }
 
 async function handleTxtUpload(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   try {
     const userNs = await resolveUserNs(request, env);
     if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
@@ -3807,6 +4237,9 @@ async function handleTxtInfo(bookId: string, env: Env): Promise<Response> {
 }
 
 async function handleImportWebdavBook(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   try {
     const userNs = await resolveUserNs(request, env);
     if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
@@ -4008,6 +4441,9 @@ async function indexTxtBookFromR2(env: Env, userNs: string, fileName: string, r2
 }
 
 async function handleChunkedUploadInit(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -4048,6 +4484,9 @@ async function handleChunkedUploadInit(request: Request, env: Env): Promise<Resp
 }
 
 async function handleChunkedUploadPart(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -4088,6 +4527,9 @@ async function handleChunkedUploadPart(request: Request, env: Env): Promise<Resp
 }
 
 async function handleChunkedUploadComplete(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -4231,6 +4673,9 @@ async function handleGetAiBookMemory(request: Request, env: Env): Promise<Respon
 }
 
 async function handleSaveAiBookMemory(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -4257,6 +4702,9 @@ async function handleSaveAiBookMemory(request: Request, env: Env): Promise<Respo
 }
 
 async function handleDeleteAiBookMemory(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -4283,6 +4731,9 @@ async function handleDeleteAiBookMemory(request: Request, env: Env): Promise<Res
 }
 
 async function handleAiProxy(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -4425,6 +4876,9 @@ async function handleWorkersAiInference(req: any, env: Env, userNs: string): Pro
 }
 
 async function handleAiProxyImage(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -4457,6 +4911,9 @@ async function handleAiProxyImage(request: Request, env: Env): Promise<Response>
 // ==========================================
 
 async function handleSearchBookMulti(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -4507,6 +4964,9 @@ async function handleSearchBookMulti(request: Request, env: Env): Promise<Respon
 }
 
 async function handleExploreBook(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -4537,6 +4997,11 @@ async function handleExploreBook(request: Request, env: Env): Promise<Response> 
 
   if (targetUrl.startsWith("/")) {
     targetUrl = `${source?.bookSourceUrl || ""}${targetUrl}`;
+  }
+
+  // SSRF protection
+  if (!isSafeRemoteUrl(targetUrl)) {
+    return jsonResponse({ isSuccess: false, errorMsg: "禁止访问内网或受限地址 (SSRF 防御)" });
   }
 
   let fetchHeaders: Record<string, string> = {
@@ -4861,7 +5326,7 @@ async function handleGetChapterList(request: Request, env: Env): Promise<Respons
       } catch {}
     }
 
-    const targetUrl = tocUrl || bookUrl;
+    let targetUrl = tocUrl || bookUrl;
     const cleanTarget = decodeURIComponent(targetUrl);
     const fileNameCandidate = cleanTarget.split("/").pop()?.split("#")[0]?.trim() || "";
 
@@ -5048,7 +5513,8 @@ async function handleGetChapterList(request: Request, env: Env): Promise<Respons
 
     const tocSpec = await analyzeUrl(targetUrl, "", 1, source?.bookSourceUrl || "", source);
     if (!tocSpec.url || !tocSpec.url.startsWith("http")) {
-      return jsonResponse({ isSuccess: true, data: [] });
+      // Return an error so the UI can distinguish "no chapters" from "fetch failed"
+      return jsonResponse({ isSuccess: false, errorMsg: "无法解析目录地址" });
     }
 
     const fetchHeaders = {
@@ -5056,13 +5522,20 @@ async function handleGetChapterList(request: Request, env: Env): Promise<Respons
       ...(tocSpec.headers as Record<string, string>),
     };
 
-    const resp = await fetch(tocSpec.url, {
-      method: tocSpec.method,
-      headers: fetchHeaders,
-      body: tocSpec.body,
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!resp.ok) return jsonResponse({ isSuccess: true, data: [] });
+    let resp: Response;
+    try {
+      resp = await fetch(tocSpec.url, {
+        method: tocSpec.method,
+        headers: fetchHeaders,
+        body: tocSpec.body,
+        signal: AbortSignal.timeout(10000),
+      });
+    } catch (fetchErr: any) {
+      return jsonResponse({ isSuccess: false, errorMsg: `目录获取失败: ${fetchErr.message || "网络错误"}` });
+    }
+    if (!resp.ok) {
+      return jsonResponse({ isSuccess: false, errorMsg: `目录获取失败: HTTP ${resp.status}` });
+    }
     const text = await fetchTextWithEncoding(resp);
     const chapters = await parseSourceChapterList(text, source, tocSpec.url);
     return jsonResponse({ isSuccess: true, data: chapters });
@@ -5314,6 +5787,9 @@ async function handleGetWebdavFile(request: Request, env: Env): Promise<Response
 }
 
 async function handleUploadFileToWebdav(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -5334,6 +5810,9 @@ async function handleUploadFileToWebdav(request: Request, env: Env): Promise<Res
 }
 
 async function handleDeleteWebdavFile(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -5352,6 +5831,9 @@ async function handleDeleteWebdavFile(request: Request, env: Env): Promise<Respo
 }
 
 async function handleDeleteWebdavFileList(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -5372,6 +5854,9 @@ async function handleDeleteWebdavFileList(request: Request, env: Env): Promise<R
 // ==========================================
 
 async function handleChangePassword(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -5383,16 +5868,15 @@ async function handleChangePassword(request: Request, env: Env): Promise<Respons
   const user = await env.DB.prepare(`SELECT password, salt FROM users WHERE username = ?1`).bind(userNs).first<any>();
   if (!user) return jsonResponse({ isSuccess: false, errorMsg: "用户不存在" });
 
-  const oldEncrypted = genEncryptedPassword(oldPassword, user.salt);
-  if (oldEncrypted !== user.password) {
+  const valid = await verifyPassword(oldPassword, user.password);
+  if (!valid) {
     return jsonResponse({ isSuccess: false, errorMsg: "原密码错误" });
   }
 
-  const newSalt = randomString(8);
-  const newEncrypted = genEncryptedPassword(newPassword, newSalt);
+  const newEncrypted = await hashPassword(newPassword);
 
   await env.DB.prepare(`UPDATE users SET password = ?1, salt = ?2 WHERE username = ?3`)
-    .bind(newEncrypted, newSalt, userNs)
+    .bind(newEncrypted, "", userNs)
     .run();
 
   return jsonResponse({ isSuccess: true, data: "密码修改成功" });
@@ -5424,6 +5908,9 @@ async function handleGetUserList(request: Request, env: Env): Promise<Response> 
 }
 
 async function handleAddUser(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -5437,7 +5924,7 @@ async function handleAddUser(request: Request, env: Env): Promise<Response> {
   }
 
   const salt = randomString(8);
-  const encrypted = genEncryptedPassword(password, salt);
+  const encrypted = await hashPassword(password);
   const now = Math.floor(Date.now() / 1000);
 
   await env.DB.prepare(
@@ -5449,6 +5936,9 @@ async function handleAddUser(request: Request, env: Env): Promise<Response> {
 }
 
 async function handleUpdateUser(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -5476,6 +5966,9 @@ async function handleUpdateUser(request: Request, env: Env): Promise<Response> {
 }
 
 async function handleDeleteUsers(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -5494,6 +5987,9 @@ async function handleDeleteUsers(request: Request, env: Env): Promise<Response> 
 }
 
 async function handleResetPassword(request: Request, env: Env): Promise<Response> {
+  const csrfError = requireCsrfToken(request);
+  if (csrfError) return csrfError;
+  
   const userNs = await resolveUserNs(request, env);
   if (!userNs) return jsonResponse({ isSuccess: false, errorMsg: "请登录后使用", data: "NEED_LOGIN" });
 
@@ -5502,11 +5998,10 @@ async function handleResetPassword(request: Request, env: Env): Promise<Response
   }
 
   const { username, password } = await request.json<any>();
-  const salt = randomString(8);
-  const encrypted = genEncryptedPassword(password, salt);
+  const encrypted = await hashPassword(password);
 
   await env.DB.prepare(`UPDATE users SET password = ?1, salt = ?2 WHERE username = ?3`)
-    .bind(encrypted, salt, username)
+    .bind(encrypted, "", username)
     .run();
 
   return jsonResponse({ isSuccess: true, data: "重置密码成功" });

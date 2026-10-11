@@ -76,6 +76,37 @@ impl BookSourceRepo {
             .collect())
     }
 
+    /// Batch fetch: get JSON for multiple book_source_urls in a single query.
+    /// Eliminates N+1 when looking up sources by URL.
+    pub async fn get_by_urls(
+        &self,
+        user_ns: &str,
+        book_source_urls: &[String],
+    ) -> Result<std::collections::HashMap<String, String>, AppError> {
+        if book_source_urls.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        // Build a single query with IN clause
+        let placeholders: Vec<String> = book_source_urls
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format("?{}", i + 2))
+            .collect();
+        let sql = format!(
+            "SELECT book_source_url, json FROM book_sources WHERE user_ns=?1 AND book_source_url IN ({})",
+            placeholders.join(",")
+        );
+        let mut query = sqlx::query(&sql).bind(user_ns);
+        for url in book_source_urls {
+            query = query.bind(url);
+        }
+        let rows = query.fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get::<String, _>("book_source_url"), r.get::<String, _>("json")))
+            .collect())
+    }
+
     pub async fn copy_to(&self, from_ns: &str, to_ns: &str) -> Result<i64, AppError> {
         let rows = sqlx::query("SELECT book_source_url, book_source_name, json, updated_at FROM book_sources WHERE user_ns=?1")
             .bind(from_ns)

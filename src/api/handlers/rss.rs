@@ -150,7 +150,8 @@ pub async fn read_remote_rss_source_file(
         .await
         .map_err(AppError::BadRequest)?;
 
-    let client = reqwest::Client::builder()
+    let client = safe_url
+        .pinned_client()
         .timeout(std::time::Duration::from_secs(30))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         .build()

@@ -209,3 +209,9 @@ CREATE TABLE IF NOT EXISTS txt_chapters (
 );
 
 CREATE INDEX IF NOT EXISTS idx_txt_chapters_book ON txt_chapters(book_id, chapter_index);
+
+-- Performance indexes for frequently-queried columns
+CREATE INDEX IF NOT EXISTS idx_json_documents_namespace_updated ON json_documents(namespace, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_book_memories_user_ns_updated ON ai_book_memories(user_ns, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_book_cache_updated ON book_cache(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_chapter_cache_book_updated ON chapter_cache(book_url, updated_at DESC);

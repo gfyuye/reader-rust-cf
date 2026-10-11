@@ -39,15 +39,40 @@ static JS_DEVICE_ID: Lazy<String> = Lazy::new(|| {
 type Aes128CbcDecryptor = cbc::Decryptor<Aes128>;
 thread_local! {
     static ACTIVE_JS_LIB: RefCell<Option<String>> = const { RefCell::new(None) };
+    static ACTIVE_JS_NAMESPACE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 pub fn with_js_lib<T>(js_lib: Option<&str>, f: impl FnOnce() -> T) -> T {
     ACTIVE_JS_LIB.with(|cell| {
-        let previous = cell.replace(js_lib.map(|value| value.to_string()));
+        let previous = cell.take();
+        cell.borrow_mut().replace(js_lib.map(|value| value.to_string()));
         let result = f();
-        cell.replace(previous);
+        cell.borrow_mut().replace(previous);
         result
     })
+}
+
+pub fn with_js_namespace<T>(namespace: Option<&str>, f: impl FnOnce() -> T) -> T {
+    ACTIVE_JS_NAMESPACE.with(|cell| {
+        let previous = cell.take();
+        cell.borrow_mut().replace(namespace.map(|value| value.to_string()));
+        let result = f();
+        cell.borrow_mut().replace(previous);
+        result
+    })
+}
+
+fn get_js_namespace() -> String {
+    ACTIVE_JS_NAMESPACE.with(|cell| cell.borrow().clone().unwrap_or_default())
+}
+
+fn namespaced_key(key: &str) -> String {
+    let ns = get_js_namespace();
+    if ns.is_empty() {
+        key.to_string()
+    } else {
+        format!("{}:{}", ns, key)
+    }
 }
 
 pub fn eval_js(script: &str, input: &str, base_url: &str) -> anyhow::Result<String> {
@@ -126,32 +151,33 @@ fn eval_js_inner_with_source(
     source_key: Option<&str>,
     bindings: Option<&HashMap<String, JsonValue>>,
 ) -> anyhow::Result<String> {
-    let rt = Runtime::new()?;
-    let ctx = Context::full(&rt)?;
-    ctx.with(|ctx| {
-        let globals = ctx.globals();
-        let input_value = input.unwrap_or("");
-        let base_url_value = base_url.unwrap_or("");
-        let shared_js = active_js_lib_script()?;
+    let source_key_val = source_key.unwrap_or("").to_string();
+    with_js_namespace(Some(&source_key_val), || {
+        let rt = Runtime::new()?;
+        let ctx = Context::full(&rt)?;
+        ctx.with(|ctx| {
+            let globals = ctx.globals();
+            let input_value = input.unwrap_or("");
+            let base_url_value = base_url.unwrap_or("");
+            let shared_js = active_js_lib_script()?;
 
-        globals.set("input", input_value)?;
-        globals.set("result", input_value)?;
-        globals.set("src", input_value)?;
-        globals.set("base_url", base_url_value)?;
-        globals.set("baseUrl", base_url_value)?;
-        if let Some(key) = key {
-            globals.set("key", key)?;
-        }
-        if let Some(page) = page {
-            globals.set("page", page)?;
-        }
+            globals.set("input", input_value)?;
+            globals.set("result", input_value)?;
+            globals.set("src", input_value)?;
+            globals.set("base_url", base_url_value)?;
+            globals.set("baseUrl", base_url_value)?;
+            if let Some(key) = key {
+                globals.set("key", key)?;
+            }
+            if let Some(page) = page {
+                globals.set("page", page)?;
+            }
 
-        // Default url variable for Legado compatibility
-        globals.set("url", base_url_value)?;
+            // Default url variable for Legado compatibility
+            globals.set("url", base_url_value)?;
 
-        // Stubs for Legado compatibility
-        let source_key_val = source_key.unwrap_or("").to_string();
-        let source_obj = Object::new(ctx.clone())?;
+            // Stubs for Legado compatibility
+            let source_obj = Object::new(ctx.clone())?;
         let sk_clone = source_key_val.clone();
         source_obj.set("key", source_key_val)?;
         source_obj.set("getKey", Func::new(move || sk_clone.clone()))?;
@@ -169,14 +195,14 @@ fn eval_js_inner_with_source(
             "get",
             Func::new(|key: String| -> Option<String> {
                 let map = JS_KV.lock().unwrap_or_else(|e| e.into_inner());
-                map.get(&key).cloned()
+                map.get(&namespaced_key(&key)).cloned()
             }),
         )?;
         cache_obj.set(
             "put",
             Func::new(|key: String, val: String| -> bool {
                 let mut map = JS_KV.lock().unwrap_or_else(|e| e.into_inner());
-                map.insert(key, val);
+                map.insert(namespaced_key(&key), val);
                 true
             }),
         )?;
@@ -207,7 +233,7 @@ fn eval_js_inner_with_source(
                     java_request_simple("GET", &key_or_url, None).unwrap_or_default()
                 } else {
                     let map = JS_KV.lock().unwrap_or_else(|e| e.into_inner());
-                    map.get(&key_or_url).cloned().unwrap_or_default()
+                    map.get(&namespaced_key(&key_or_url)).cloned().unwrap_or_default()
                 }
             }),
         )?;
@@ -224,7 +250,7 @@ fn eval_js_inner_with_source(
                     java_request_simple("PUT", &key_or_url, Some(val_or_body)).unwrap_or_default()
                 } else {
                     let mut map = JS_KV.lock().unwrap_or_else(|e| e.into_inner());
-                    map.insert(key_or_url, val_or_body.clone());
+                    map.insert(namespaced_key(&key_or_url), val_or_body.clone());
                     val_or_body
                 }
             }),
@@ -291,14 +317,14 @@ fn eval_js_inner_with_source(
             "kv_get",
             Func::new(|key: String| -> Option<String> {
                 let map = JS_KV.lock().unwrap_or_else(|e| e.into_inner());
-                map.get(&key).cloned()
+                map.get(&namespaced_key(&key)).cloned()
             }),
         )?;
         globals.set(
             "kv_put",
             Func::new(|key: String, val: String| -> bool {
                 let mut map = JS_KV.lock().unwrap_or_else(|e| e.into_inner());
-                map.insert(key, val);
+                map.insert(namespaced_key(&key), val);
                 true
             }),
         )?;

@@ -610,14 +610,46 @@ export interface LegadoContext {
   [key: string]: any;
 }
 
-// Global variable store shared across Legado rule executions
-export const sessionVariableStore = new Map<string, any>();
-export function getSessionVariable(key: string): any {
-  return sessionVariableStore.get(key) || "";
+// Request-scoped variable store to prevent cross-request contamination.
+// Each request creates its own scope via createSessionScope().
+let currentSessionScope: SessionScope | null = null;
+
+export interface SessionScope {
+  store: Map<string, any>;
+  get: (key: string) => any;
+  set: (key: string, val: any) => any;
+  clear: () => void;
 }
+
+export function createSessionScope(): SessionScope {
+  const store = new Map<string, any>();
+  const scope: SessionScope = {
+    store,
+    get: (key: string) => store.get(key) || "",
+    set: (key: string, val: any) => { store.set(key, val); return val; },
+    clear: () => store.clear(),
+  };
+  currentSessionScope = scope;
+  return scope;
+}
+
+export function getSessionVariable(key: string): any {
+  if (currentSessionScope) return currentSessionScope.get(key);
+  return "";
+}
+
 export function setSessionVariable(key: string, val: any): any {
-  sessionVariableStore.set(key, val);
-  return val;
+  if (!currentSessionScope) {
+    currentSessionScope = createSessionScope();
+  }
+  return currentSessionScope.set(key, val);
+}
+
+export function clearSessionScope() {
+  if (currentSessionScope) {
+    currentSessionScope.clear();
+    currentSessionScope = null;
+  }
 }
 
 // Pure synchronous AES-128-CBC / ECB decryption
@@ -1596,34 +1628,41 @@ export async function executeLegadoJs(code: string, context: LegadoContext = {})
   const argNames = Object.keys(env);
   const argValues = Object.values(env);
 
-  // Try AsyncFunction first if permitted by environment
-  try {
-    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-    let bodyCode: string;
-    if (!cleanCode.includes(";") && !cleanCode.includes("\n") && !cleanCode.startsWith("return")) {
-      bodyCode = `return (${cleanCode});`;
-    } else {
-      bodyCode = `
-        let __output = typeof result !== 'undefined' ? result : '';
-        const __exec = async () => {
-          ${cleanCode}
-        };
-        const __ret = await __exec();
-        if (__ret !== undefined) return __ret;
-        return typeof result !== 'undefined' ? result : __output;
-      `;
-    }
-    const fn = new AsyncFunction(...argNames, bodyCode);
-    return await fn(...argValues);
-  } catch (err: any) {
-    // If dynamic code generation is disabled (Cloudflare Workers) or syntax error:
-    // Fall back to pure AST interpreter
+  // Cloudflare Workers blocks dynamic code generation (new AsyncFunction).
+  // Detect Workers environment and skip straight to the AST interpreter.
+  const isWorkers = typeof (globalThis as any).WebSocketPair !== "undefined"
+    || typeof (globalThis as any).Cloudflare !== "undefined";
+
+  if (!isWorkers) {
     try {
-      return await interpretLegadoJs(cleanCode, env);
-    } catch (interpErr: any) {
-      console.warn("Legado JS execution error:", interpErr.message);
-      return context.result;
+      const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+      let bodyCode: string;
+      if (!cleanCode.includes(";") && !cleanCode.includes("\n") && !cleanCode.startsWith("return")) {
+        bodyCode = `return (${cleanCode});`;
+      } else {
+        bodyCode = `
+          let __output = typeof result !== 'undefined' ? result : '';
+          const __exec = async () => {
+            ${cleanCode}
+          };
+          const __ret = await __exec();
+          if (__ret !== undefined) return __ret;
+          return typeof result !== 'undefined' ? result : __output;
+        `;
+      }
+      const fn = new AsyncFunction(...argNames, bodyCode);
+      return await fn(...argValues);
+    } catch (_err) {
+      // Fall through to AST interpreter
     }
+  }
+
+  // Fall back to pure AST interpreter (works on Workers and as fallback)
+  try {
+    return await interpretLegadoJs(cleanCode, env);
+  } catch (interpErr: any) {
+    console.warn("Legado JS execution error:", interpErr.message);
+    return context.result;
   }
 }
 
