@@ -309,7 +309,12 @@ export default {
 // ==========================================
 
 async function handleLogin(request: Request, env: Env): Promise<Response> {
-  const body = await request.json<any>();
+  let body: any = {};
+  try {
+    body = await request.json<any>();
+  } catch {
+    // Empty or invalid JSON body
+  }
   const { username, password, isLogin, code } = body;
 
   if (!username || !password) {
